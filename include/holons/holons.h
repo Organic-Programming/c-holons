@@ -72,6 +72,12 @@ int holons_parse_uri(const char *uri, holons_uri_t *out, char *err, size_t err_l
 int holons_listen(const char *uri, holons_listener_t *out, char *err, size_t err_len);
 int holons_accept(holons_listener_t *listener, holons_conn_t *out, char *err, size_t err_len);
 int holons_mem_dial(holons_listener_t *listener, holons_conn_t *out, char *err, size_t err_len);
+int holons_dial_tcp(const char *host,
+                    int port,
+                    holons_conn_t *out,
+                    char *err,
+                    size_t err_len);
+int holons_dial_stdio(holons_conn_t *out, char *err, size_t err_len);
 
 ssize_t holons_conn_read(const holons_conn_t *conn, void *buf, size_t n);
 ssize_t holons_conn_write(const holons_conn_t *conn, const void *buf, size_t n);

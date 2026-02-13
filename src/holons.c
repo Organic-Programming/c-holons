@@ -248,6 +248,63 @@ static int create_tcp_listener(const char *host, int port, int *out_fd, char *er
   return -1;
 }
 
+static int connect_tcp_socket(const char *host, int port, int *out_fd, char *err, size_t err_len) {
+  struct addrinfo hints;
+  struct addrinfo *res = NULL;
+  struct addrinfo *it;
+  const char *connect_host = host;
+  char service[16];
+  int rc;
+  int fd = -1;
+  int last_errno = 0;
+
+  if (out_fd == NULL) {
+    set_err(err, err_len, "output fd is required");
+    return -1;
+  }
+  if (port < 0 || port > 65535) {
+    set_err(err, err_len, "port out of range: %d", port);
+    return -1;
+  }
+
+  if (connect_host == NULL || connect_host[0] == '\0' || strcmp(connect_host, "0.0.0.0") == 0) {
+    connect_host = "127.0.0.1";
+  }
+
+  (void)memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+
+  (void)snprintf(service, sizeof(service), "%d", port);
+  rc = getaddrinfo(connect_host, service, &hints, &res);
+  if (rc != 0) {
+    set_err(err, err_len, "getaddrinfo failed: %s", gai_strerror(rc));
+    return -1;
+  }
+
+  for (it = res; it != NULL; it = it->ai_next) {
+    fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+    if (fd < 0) {
+      last_errno = errno;
+      continue;
+    }
+
+    if (connect(fd, it->ai_addr, it->ai_addrlen) == 0) {
+      *out_fd = fd;
+      freeaddrinfo(res);
+      return 0;
+    }
+
+    last_errno = errno;
+    (void)close(fd);
+    fd = -1;
+  }
+
+  freeaddrinfo(res);
+  set_err(err, err_len, "unable to connect: %s", strerror(last_errno));
+  return -1;
+}
+
 static int create_unix_listener(const char *path, int *out_fd, char *err, size_t err_len) {
   struct sockaddr_un addr;
   int fd;
@@ -628,6 +685,41 @@ int holons_mem_dial(holons_listener_t *listener, holons_conn_t *out, char *err, 
   out->scheme = HOLONS_SCHEME_MEM;
   out->owns_read_fd = 1;
   out->owns_write_fd = 1;
+  return 0;
+}
+
+int holons_dial_tcp(const char *host, int port, holons_conn_t *out, char *err, size_t err_len) {
+  int fd;
+
+  if (out == NULL) {
+    set_err(err, err_len, "connection output is required");
+    return -1;
+  }
+  if (connect_tcp_socket(host, port, &fd, err, err_len) != 0) {
+    return -1;
+  }
+
+  (void)memset(out, 0, sizeof(*out));
+  out->read_fd = fd;
+  out->write_fd = fd;
+  out->scheme = HOLONS_SCHEME_TCP;
+  out->owns_read_fd = 1;
+  out->owns_write_fd = 1;
+  return 0;
+}
+
+int holons_dial_stdio(holons_conn_t *out, char *err, size_t err_len) {
+  if (out == NULL) {
+    set_err(err, err_len, "connection output is required");
+    return -1;
+  }
+
+  (void)memset(out, 0, sizeof(*out));
+  out->read_fd = STDIN_FILENO;
+  out->write_fd = STDOUT_FILENO;
+  out->scheme = HOLONS_SCHEME_STDIO;
+  out->owns_read_fd = 0;
+  out->owns_write_fd = 0;
   return 0;
 }
 

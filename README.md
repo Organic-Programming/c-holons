@@ -33,6 +33,8 @@ clang -std=c11 -Wall -Wextra -pedantic -I include src/holons.c test/holons_test.
 | `holons_parse_uri` | Parse transport URI into normalized struct |
 | `holons_listen` / `holons_accept` | Listener + connection lifecycle |
 | `holons_mem_dial` | Client-side dial for `mem://` |
+| `holons_dial_tcp` | Client-side dial for TCP listeners |
+| `holons_dial_stdio` | Wrap current process stdin/stdout as a client connection |
 | `holons_serve` | Standard connection loop for a holon `serve` command |
 | `holons_parse_holon` | Parse identity fields from `HOLON.md` frontmatter |
 
@@ -46,3 +48,8 @@ clang -std=c11 -Wall -Wextra -pedantic -I include src/holons.c test/holons_test.
 | `mem://` | In-process socketpair listener + dial |
 | `ws://` | URI-compatible listener (socket layer) |
 | `wss://` | URI-compatible listener (socket layer) |
+
+Cross-language smoke test:
+
+- The C test runner starts a Go echo server from `sdk/go-holons` and verifies
+  TCP round-trip via `holons_dial_tcp`.

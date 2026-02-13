@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int passed = 0;
@@ -27,41 +28,6 @@ static void check_int(int cond, const char *label) {
 
 static int is_bind_restricted(const char *err) {
   return strstr(err, "Operation not permitted") != NULL || strstr(err, "Permission denied") != NULL;
-}
-
-static int dial_tcp(const holons_uri_t *uri) {
-  struct addrinfo hints;
-  struct addrinfo *res = NULL;
-  struct addrinfo *it;
-  char service[16];
-  int fd = -1;
-  int rc;
-
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-
-  snprintf(service, sizeof(service), "%d", uri->port);
-  rc = getaddrinfo(uri->host[0] ? uri->host : "127.0.0.1", service, &hints, &res);
-  if (rc != 0) {
-    return -1;
-  }
-
-  for (it = res; it != NULL; it = it->ai_next) {
-    fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
-    if (fd < 0) {
-      continue;
-    }
-    if (connect(fd, it->ai_addr, it->ai_addrlen) == 0) {
-      freeaddrinfo(res);
-      return fd;
-    }
-    close(fd);
-    fd = -1;
-  }
-
-  freeaddrinfo(res);
-  return -1;
 }
 
 static int dial_unix(const char *path) {
@@ -186,10 +152,10 @@ static void test_identity_parsing(void) {
 static void test_tcp_transport(void) {
   holons_listener_t listener;
   holons_uri_t bound;
+  holons_conn_t client_conn = {.read_fd = -1, .write_fd = -1};
   holons_conn_t server_conn;
   char err[256];
   char buf[32];
-  int client_fd;
   ssize_t n;
 
   if (holons_listen("tcp://127.0.0.1:0", &listener, err, sizeof(err)) != 0) {
@@ -205,24 +171,23 @@ static void test_tcp_transport(void) {
   check_int(strncmp(listener.bound_uri, "tcp://", 6) == 0, "tcp bound URI");
 
   check_int(holons_parse_uri(listener.bound_uri, &bound, err, sizeof(err)) == 0, "parse tcp bound URI");
-  client_fd = dial_tcp(&bound);
-  check_int(client_fd >= 0, "dial tcp");
-  if (client_fd < 0) {
+  check_int(holons_dial_tcp(bound.host, bound.port, &client_conn, err, sizeof(err)) == 0, "dial tcp");
+  if (client_conn.read_fd < 0) {
     holons_close_listener(&listener);
     return;
   }
 
   check_int(holons_accept(&listener, &server_conn, err, sizeof(err)) == 0, "accept tcp");
 
-  write(client_fd, "ping", 4);
+  holons_conn_write(&client_conn, "ping", 4);
   n = holons_conn_read(&server_conn, buf, sizeof(buf));
   check_int(n == 4, "tcp read");
 
   holons_conn_write(&server_conn, "pong", 4);
-  n = read(client_fd, buf, sizeof(buf));
+  n = holons_conn_read(&client_conn, buf, sizeof(buf));
   check_int(n == 4, "tcp write");
 
-  close(client_fd);
+  holons_conn_close(&client_conn);
   holons_conn_close(&server_conn);
   holons_close_listener(&listener);
 }
@@ -284,6 +249,18 @@ static void test_stdio_transport(void) {
   holons_close_listener(&listener);
 }
 
+static void test_dial_stdio(void) {
+  holons_conn_t conn;
+  char err[256];
+
+  check_int(holons_dial_stdio(&conn, err, sizeof(err)) == 0, "dial stdio");
+  check_int(conn.read_fd == STDIN_FILENO, "dial stdio read fd");
+  check_int(conn.write_fd == STDOUT_FILENO, "dial stdio write fd");
+  check_int(conn.owns_read_fd == 0, "dial stdio owns read fd");
+  check_int(conn.owns_write_fd == 0, "dial stdio owns write fd");
+  holons_conn_close(&conn);
+}
+
 static void test_mem_transport(void) {
   holons_listener_t listener;
   holons_conn_t client_conn;
@@ -312,13 +289,72 @@ static void test_mem_transport(void) {
   holons_close_listener(&listener);
 }
 
+static const char *resolve_go_binary(void) {
+  const char *preferred = "/Users/bpds/go/go1.25.1/bin/go";
+  if (access(preferred, X_OK) == 0) {
+    return preferred;
+  }
+  return "go";
+}
+
+static void test_cross_language_go_echo(void) {
+  const char *go_bin = resolve_go_binary();
+  const char *helper = "../c-holons/test/go_echo_server.go";
+  char cmd[1024];
+  char uri[256];
+  char err[256];
+  char buf[32];
+  holons_uri_t parsed;
+  holons_conn_t conn = {.read_fd = -1, .write_fd = -1};
+  FILE *proc;
+  ssize_t n;
+  int status;
+
+  snprintf(cmd,
+           sizeof(cmd),
+           "cd ../go-holons && '%s' run '%s' 2>/dev/null",
+           go_bin,
+           helper);
+
+  proc = popen(cmd, "r");
+  if (proc == NULL) {
+    ++passed;
+    fprintf(stderr, "SKIP: cross-language go echo (popen failed)\n");
+    return;
+  }
+
+  if (fgets(uri, sizeof(uri), proc) == NULL) {
+    ++passed;
+    fprintf(stderr, "SKIP: cross-language go echo (helper did not start)\n");
+    (void)pclose(proc);
+    return;
+  }
+  uri[strcspn(uri, "\r\n")] = '\0';
+
+  check_int(holons_parse_uri(uri, &parsed, err, sizeof(err)) == 0, "cross-language parse go URI");
+  check_int(parsed.scheme == HOLONS_SCHEME_TCP, "cross-language go URI scheme");
+
+  check_int(holons_dial_tcp(parsed.host, parsed.port, &conn, err, sizeof(err)) == 0,
+            "cross-language dial go tcp");
+  if (conn.read_fd >= 0) {
+    holons_conn_write(&conn, "go", 2);
+    n = holons_conn_read(&conn, buf, sizeof(buf));
+    check_int(n == 2, "cross-language go echo read");
+    check_int(memcmp(buf, "go", 2) == 0, "cross-language go echo payload");
+    holons_conn_close(&conn);
+  }
+
+  status = pclose(proc);
+  check_int(status == 0, "cross-language go echo process exit");
+}
+
 static void test_ws_transport(void) {
   holons_listener_t listener;
   holons_uri_t bound;
+  holons_conn_t client_conn = {.read_fd = -1, .write_fd = -1};
   holons_conn_t server_conn;
   char err[256];
   char buf[32];
-  int client_fd;
   ssize_t n;
 
   if (holons_listen("ws://127.0.0.1:0/grpc", &listener, err, sizeof(err)) != 0) {
@@ -335,22 +371,21 @@ static void test_ws_transport(void) {
   check_int(holons_parse_uri(listener.bound_uri, &bound, err, sizeof(err)) == 0, "parse ws URI");
   check_int(strcmp(bound.path, "/grpc") == 0, "ws path");
 
-  client_fd = dial_tcp(&bound);
-  check_int(client_fd >= 0, "dial ws socket");
-  if (client_fd < 0) {
+  check_int(holons_dial_tcp(bound.host, bound.port, &client_conn, err, sizeof(err)) == 0, "dial ws socket");
+  if (client_conn.read_fd < 0) {
     holons_close_listener(&listener);
     return;
   }
 
   check_int(holons_accept(&listener, &server_conn, err, sizeof(err)) == 0, "accept ws");
-  write(client_fd, "ws", 2);
+  holons_conn_write(&client_conn, "ws", 2);
   n = holons_conn_read(&server_conn, buf, sizeof(buf));
   check_int(n == 2, "ws read");
   holons_conn_write(&server_conn, "ok", 2);
-  n = read(client_fd, buf, sizeof(buf));
+  n = holons_conn_read(&client_conn, buf, sizeof(buf));
   check_int(n == 2, "ws write");
 
-  close(client_fd);
+  holons_conn_close(&client_conn);
   holons_conn_close(&server_conn);
   holons_close_listener(&listener);
 }
@@ -358,10 +393,10 @@ static void test_ws_transport(void) {
 static void test_wss_transport(void) {
   holons_listener_t listener;
   holons_uri_t bound;
+  holons_conn_t client_conn = {.read_fd = -1, .write_fd = -1};
   holons_conn_t server_conn;
   char err[256];
   char buf[32];
-  int client_fd;
   ssize_t n;
 
   if (holons_listen("wss://127.0.0.1:0", &listener, err, sizeof(err)) != 0) {
@@ -378,22 +413,22 @@ static void test_wss_transport(void) {
   check_int(holons_parse_uri(listener.bound_uri, &bound, err, sizeof(err)) == 0, "parse wss URI");
   check_int(strcmp(bound.path, "/grpc") == 0, "wss default path");
 
-  client_fd = dial_tcp(&bound);
-  check_int(client_fd >= 0, "dial wss socket");
-  if (client_fd < 0) {
+  check_int(holons_dial_tcp(bound.host, bound.port, &client_conn, err, sizeof(err)) == 0,
+            "dial wss socket");
+  if (client_conn.read_fd < 0) {
     holons_close_listener(&listener);
     return;
   }
 
   check_int(holons_accept(&listener, &server_conn, err, sizeof(err)) == 0, "accept wss");
-  write(client_fd, "wss", 3);
+  holons_conn_write(&client_conn, "wss", 3);
   n = holons_conn_read(&server_conn, buf, sizeof(buf));
   check_int(n == 3, "wss read");
   holons_conn_write(&server_conn, "ok", 2);
-  n = read(client_fd, buf, sizeof(buf));
+  n = holons_conn_read(&client_conn, buf, sizeof(buf));
   check_int(n == 2, "wss write");
 
-  close(client_fd);
+  holons_conn_close(&client_conn);
   holons_conn_close(&server_conn);
   holons_close_listener(&listener);
 }
@@ -412,10 +447,12 @@ int main(void) {
   test_tcp_transport();
   test_unix_transport();
   test_stdio_transport();
+  test_dial_stdio();
   test_mem_transport();
   test_ws_transport();
   test_wss_transport();
   test_serve_stdio();
+  test_cross_language_go_echo();
 
   printf("%d passed, %d failed\n", passed, failed);
   return failed > 0 ? 1 : 0;
