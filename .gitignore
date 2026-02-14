@@ -4,3 +4,5 @@ test_runner
 *.so
 *.dylib
 bin/
+
+*.dSYM/
