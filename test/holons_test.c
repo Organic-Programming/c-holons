@@ -118,6 +118,7 @@ static void test_certification_declarations(void) {
   check_int(strstr(raw, "\"holon_rpc_server\": true") != NULL, "cert holon_rpc_server capability");
   check_int(strstr(raw, "\"bidirectional\": true") != NULL, "cert bidirectional capability");
   check_int(strstr(raw, "\"valence\": \"multi\"") != NULL, "cert valence declaration");
+  check_int(strstr(raw, "\"routing\": [\"unicast\", \"fanout\"]") != NULL, "cert routing declaration");
 }
 
 static void test_echo_scripts_exist(void) {

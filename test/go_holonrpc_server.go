@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,6 +19,8 @@ const (
 	defaultBindURL = "ws://127.0.0.1:0/rpc"
 	defaultSDK     = "c-holons"
 	defaultVersion = "0.1.0"
+	fanoutMethod   = "*.Echo/Ping"
+	peerPingMethod = "echo.v1.Echo/Ping"
 )
 
 type options struct {
@@ -79,6 +82,69 @@ func main() {
 		}
 
 		return server.Invoke(ctx, clientID, "client.v1.Client/Hello", map[string]any{"name": name})
+	})
+
+	server.Register(fanoutMethod, func(ctx context.Context, params map[string]any) (map[string]any, error) {
+		markHandled()
+		clientIDs := server.ClientIDs()
+		if len(clientIDs) == 0 {
+			return nil, &holonrpc.ResponseError{
+				Code:    5,
+				Message: "no connected peers",
+			}
+		}
+
+		results := make([]any, 0, len(clientIDs))
+		for _, clientID := range clientIDs {
+			reply, invokeErr := server.Invoke(ctx, clientID, peerPingMethod, params)
+			if invokeErr != nil {
+				if errors.Is(invokeErr, context.Canceled) || errors.Is(invokeErr, context.DeadlineExceeded) {
+					return nil, invokeErr
+				}
+
+				var rpcErr *holonrpc.ResponseError
+				if errors.As(invokeErr, &rpcErr) {
+					// Method-not-found means this peer does not implement the target method.
+					if rpcErr.Code == -32601 || rpcErr.Code == 5 {
+						continue
+					}
+					results = append(results, map[string]any{
+						"peer": clientID,
+						"error": map[string]any{
+							"code":    rpcErr.Code,
+							"message": rpcErr.Message,
+						},
+					})
+					continue
+				}
+
+				results = append(results, map[string]any{
+					"peer": clientID,
+					"error": map[string]any{
+						"code":    13,
+						"message": invokeErr.Error(),
+					},
+				})
+				continue
+			}
+
+			results = append(results, map[string]any{
+				"peer":   clientID,
+				"result": reply,
+			})
+		}
+
+		if len(results) == 0 {
+			return nil, &holonrpc.ResponseError{
+				Code:    5,
+				Message: "no peer implements echo.v1.Echo/Ping",
+			}
+		}
+
+		// `value` aligns with go-holons decodeResult wrapping for non-object JSON results.
+		return map[string]any{
+			"value": results,
+		}, nil
 	})
 
 	addr, err := server.Start()

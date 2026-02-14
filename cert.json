@@ -21,7 +21,7 @@
     "holon_rpc_server": true,
     "bidirectional": true,
     "valence": "multi",
-    "routing": ["unicast"]
+    "routing": ["unicast", "fanout"]
   },
   "last_certified": {
     "commit": "f499d07cb6e6f7688348d529a35d1bae0f50f7cb",
