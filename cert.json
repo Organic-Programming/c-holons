@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "executables": {
     "echo_server": "./bin/echo-server",
-    "echo_client": "./bin/echo-client"
+    "echo_client": "./bin/echo-client",
+    "holon_rpc_client": "./bin/holon-rpc-client"
   },
   "capabilities": {
     "grpc_listen_tcp": true,
@@ -15,15 +16,15 @@
     "grpc_dial_stdio": true,
     "grpc_dial_unix": false,
     "grpc_dial_ws": false,
-    "holon_rpc_client": false,
+    "holon_rpc_client": true,
     "holon_rpc_server": false,
     "bidirectional": false,
     "valence": "mono",
     "routing": ["unicast"]
   },
   "last_certified": {
-    "commit": "b7a4579cbd7a42b3a81f47bb3d193d7455d3d6a4",
+    "commit": "f499d07cb6e6f7688348d529a35d1bae0f50f7cb",
     "date": "2026-02-14",
-    "level": 0
+    "level": 2
   }
 }

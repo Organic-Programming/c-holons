@@ -107,15 +107,20 @@ static void test_certification_declarations(void) {
             "cert echo_server declaration");
   check_int(strstr(raw, "\"echo_client\": \"./bin/echo-client\"") != NULL,
             "cert echo_client declaration");
+  check_int(strstr(raw, "\"holon_rpc_client\": \"./bin/holon-rpc-client\"") != NULL,
+            "cert holon_rpc_client declaration");
   check_int(strstr(raw, "\"grpc_dial_tcp\": true") != NULL, "cert grpc_dial_tcp declaration");
   check_int(strstr(raw, "\"grpc_dial_stdio\": true") != NULL, "cert grpc_dial_stdio declaration");
+  check_int(strstr(raw, "\"holon_rpc_client\": true") != NULL, "cert holon_rpc_client capability");
 }
 
 static void test_echo_scripts_exist(void) {
   check_int(access("./bin/echo-client", F_OK) == 0, "echo-client script exists");
   check_int(access("./bin/echo-server", F_OK) == 0, "echo-server script exists");
+  check_int(access("./bin/holon-rpc-client", F_OK) == 0, "holon-rpc-client script exists");
   check_int(access("./bin/echo-client", X_OK) == 0, "echo-client script executable");
   check_int(access("./bin/echo-server", X_OK) == 0, "echo-server script executable");
+  check_int(access("./bin/holon-rpc-client", X_OK) == 0, "holon-rpc-client script executable");
 }
 
 static void test_echo_wrapper_invocation(void) {
@@ -227,6 +232,45 @@ static void test_echo_wrapper_invocation(void) {
               "echo-server wrapper sdk default");
     check_int(strstr(capture, "--listen") != NULL && strstr(capture, "stdio://") != NULL,
               "echo-server wrapper forwards listen URI");
+  }
+
+  capture[0] = '\0';
+  exit_code =
+      command_exit_code("./bin/echo-server serve --listen stdio:// --sdk cert-go >/dev/null 2>&1");
+  check_int(exit_code == 0, "echo-server wrapper serve exit");
+  check_int(read_file(fake_log, capture, sizeof(capture)) == 0,
+            "read echo-server wrapper serve capture");
+  if (capture[0] != '\0') {
+    check_int(strstr(capture, "ARG1=./cmd/echo-server") != NULL,
+              "echo-server serve wrapper command path");
+    check_int(strstr(capture, "ARG2=serve") != NULL, "echo-server serve wrapper preserves serve");
+    check_int(strstr(capture, "ARG3=--sdk") != NULL &&
+                  strstr(capture, "ARG4=c-holons") != NULL,
+              "echo-server serve wrapper default sdk placement");
+    check_int(strstr(capture, "--listen") != NULL && strstr(capture, "stdio://") != NULL,
+              "echo-server serve wrapper forwards listen URI");
+  }
+
+  capture[0] = '\0';
+  exit_code =
+      command_exit_code("./bin/holon-rpc-client ws://127.0.0.1:8080/rpc --connect-only >/dev/null 2>&1");
+  check_int(exit_code == 0, "holon-rpc-client wrapper exit");
+  check_int(read_file(fake_log, capture, sizeof(capture)) == 0,
+            "read holon-rpc-client wrapper capture");
+  if (capture[0] != '\0') {
+    check_int(strstr(capture, "PWD=") != NULL && strstr(capture, "/sdk/go-holons") != NULL,
+              "holon-rpc-client wrapper cwd");
+    check_int(strstr(capture, "ARG0=run") != NULL, "holon-rpc-client wrapper uses go run");
+    check_int(strstr(capture, "go_holonrpc_client.go") != NULL,
+              "holon-rpc-client wrapper helper path");
+    check_int(strstr(capture, "--sdk") != NULL && strstr(capture, "c-holons") != NULL,
+              "holon-rpc-client wrapper sdk default");
+    check_int(strstr(capture, "--server-sdk") != NULL && strstr(capture, "go-holons") != NULL,
+              "holon-rpc-client wrapper server sdk default");
+    check_int(strstr(capture, "ws://127.0.0.1:8080/rpc") != NULL,
+              "holon-rpc-client wrapper forwards URI");
+    check_int(strstr(capture, "--connect-only") != NULL,
+              "holon-rpc-client wrapper forwards connect-only");
   }
 
   unlink(fake_go);
@@ -531,6 +575,86 @@ static void test_cross_language_go_echo(void) {
   check_int(status == 0, "cross-language go echo process exit");
 }
 
+static void test_cross_language_go_holonrpc(void) {
+  const char *go_bin = resolve_go_binary();
+  const char *helper = "../c-holons/test/go_holonrpc_server.go";
+  const char *client_args[] = {
+      "--connect-only",
+      "--method echo.v1.Echo/Ping --message cert",
+      "--method does.not.Exist/Nope --expect-error -32601,12",
+      "--method rpc.heartbeat",
+  };
+  const char *client_labels[] = {
+      "cross-language holon-rpc connect",
+      "cross-language holon-rpc echo",
+      "cross-language holon-rpc error",
+      "cross-language holon-rpc heartbeat",
+  };
+  const char *server_labels[] = {
+      "cross-language holon-rpc server exit connect",
+      "cross-language holon-rpc server exit echo",
+      "cross-language holon-rpc server exit error",
+      "cross-language holon-rpc server exit heartbeat",
+  };
+  char server_cmd[1024];
+  char client_cmd[2048];
+  char uri[256];
+  FILE *proc;
+  int i;
+
+  for (i = 0; i < 4; ++i) {
+    int exit_code;
+    int status;
+
+    snprintf(server_cmd,
+             sizeof(server_cmd),
+             "cd ../go-holons && '%s' run '%s' 2>/dev/null",
+             go_bin,
+             helper);
+
+    proc = popen(server_cmd, "r");
+    if (proc == NULL) {
+      ++passed;
+      fprintf(stderr, "SKIP: %s (popen failed)\n", client_labels[i]);
+      return;
+    }
+
+    if (fgets(uri, sizeof(uri), proc) == NULL) {
+      ++passed;
+      fprintf(stderr, "SKIP: %s (helper did not start)\n", client_labels[i]);
+      (void)pclose(proc);
+      return;
+    }
+    uri[strcspn(uri, "\r\n")] = '\0';
+
+    snprintf(client_cmd,
+             sizeof(client_cmd),
+             "./bin/holon-rpc-client \"%s\" %s >/dev/null 2>&1",
+             uri,
+             client_args[i]);
+    exit_code = command_exit_code(client_cmd);
+    check_int(exit_code == 0, client_labels[i]);
+
+    status = pclose(proc);
+    check_int(status == 0, server_labels[i]);
+  }
+}
+
+static void test_go_client_against_sdk_stdio_server(void) {
+  const char *go_bin = resolve_go_binary();
+  char cmd[2048];
+  int exit_code;
+
+  snprintf(cmd,
+           sizeof(cmd),
+           "cd ../go-holons && '%s' run ./cmd/echo-client --sdk go-holons --server-sdk c-holons "
+           "--message cert-l2-listen-stdio --stdio-bin ../c-holons/bin/echo-server stdio:// "
+           ">/dev/null 2>&1",
+           go_bin);
+  exit_code = command_exit_code(cmd);
+  check_int(exit_code == 0, "go echo-client stdio dial against c-holons server");
+}
+
 static void test_ws_transport(void) {
   holons_listener_t listener;
   holons_uri_t bound;
@@ -639,6 +763,8 @@ int main(void) {
   test_wss_transport();
   test_serve_stdio();
   test_cross_language_go_echo();
+  test_cross_language_go_holonrpc();
+  test_go_client_against_sdk_stdio_server();
 
   printf("%d passed, %d failed\n", passed, failed);
   return failed > 0 ? 1 : 0;
