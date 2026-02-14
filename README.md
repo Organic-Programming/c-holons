@@ -21,9 +21,25 @@ The package mirrors the Go reference surface:
 ## Build and test
 
 ```bash
+make test
+```
+
+Equivalent manual command:
+
+```bash
 clang -std=c11 -Wall -Wextra -pedantic -I include src/holons.c test/holons_test.c -o test_runner
 ./test_runner
 ```
+
+## Certification executables
+
+`cert.json` declares runnable wrappers:
+
+- `./bin/echo-server`
+- `./bin/echo-client`
+
+Both wrappers invoke Go reference helpers with default SDK metadata set
+to `c-holons` and support argument pass-through.
 
 ## API surface
 

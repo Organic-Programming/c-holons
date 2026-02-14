@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -51,6 +52,188 @@ static int noop_handler(const holons_conn_t *conn, void *ctx) {
   (void)ctx;
   ++handler_calls;
   return 0;
+}
+
+static int read_file(const char *path, char *buf, size_t buf_len) {
+  FILE *f;
+  size_t n;
+
+  if (path == NULL || buf == NULL || buf_len == 0) {
+    return -1;
+  }
+
+  f = fopen(path, "r");
+  if (f == NULL) {
+    return -1;
+  }
+
+  n = fread(buf, 1, buf_len - 1, f);
+  if (ferror(f)) {
+    (void)fclose(f);
+    return -1;
+  }
+  buf[n] = '\0';
+  (void)fclose(f);
+  return 0;
+}
+
+static int command_exit_code(const char *cmd) {
+  int status = system(cmd);
+  if (status == -1 || !WIFEXITED(status)) {
+    return -1;
+  }
+  return WEXITSTATUS(status);
+}
+
+static void restore_env(const char *name, char *value) {
+  if (value != NULL) {
+    (void)setenv(name, value, 1);
+    free(value);
+    return;
+  }
+  (void)unsetenv(name);
+}
+
+static void test_certification_declarations(void) {
+  char raw[2048];
+  int rc;
+
+  rc = read_file("cert.json", raw, sizeof(raw));
+  check_int(rc == 0, "read cert.json");
+  if (rc != 0) {
+    return;
+  }
+  check_int(strstr(raw, "\"echo_server\": \"./bin/echo-server\"") != NULL,
+            "cert echo_server declaration");
+  check_int(strstr(raw, "\"echo_client\": \"./bin/echo-client\"") != NULL,
+            "cert echo_client declaration");
+  check_int(strstr(raw, "\"grpc_dial_tcp\": true") != NULL, "cert grpc_dial_tcp declaration");
+  check_int(strstr(raw, "\"grpc_dial_stdio\": true") != NULL, "cert grpc_dial_stdio declaration");
+}
+
+static void test_echo_scripts_exist(void) {
+  check_int(access("./bin/echo-client", F_OK) == 0, "echo-client script exists");
+  check_int(access("./bin/echo-server", F_OK) == 0, "echo-server script exists");
+  check_int(access("./bin/echo-client", X_OK) == 0, "echo-client script executable");
+  check_int(access("./bin/echo-server", X_OK) == 0, "echo-server script executable");
+}
+
+static void test_echo_wrapper_invocation(void) {
+  char fake_go[] = "/tmp/holons_fake_go_XXXXXX";
+  char fake_log[] = "/tmp/holons_fake_go_log_XXXXXX";
+  char capture[8192];
+  char *prev_go_bin = NULL;
+  char *prev_log = NULL;
+  char *prev_gocache = NULL;
+  int fake_fd = -1;
+  int log_fd = -1;
+  FILE *script = NULL;
+  int exit_code;
+
+  if (getenv("GO_BIN") != NULL) {
+    prev_go_bin = strdup(getenv("GO_BIN"));
+  }
+  if (getenv("HOLONS_FAKE_GO_LOG") != NULL) {
+    prev_log = strdup(getenv("HOLONS_FAKE_GO_LOG"));
+  }
+  if (getenv("GOCACHE") != NULL) {
+    prev_gocache = strdup(getenv("GOCACHE"));
+  }
+
+  fake_fd = mkstemp(fake_go);
+  check_int(fake_fd >= 0, "mkstemp fake go binary");
+  if (fake_fd < 0) {
+    restore_env("GO_BIN", prev_go_bin);
+    restore_env("HOLONS_FAKE_GO_LOG", prev_log);
+    restore_env("GOCACHE", prev_gocache);
+    return;
+  }
+
+  log_fd = mkstemp(fake_log);
+  check_int(log_fd >= 0, "mkstemp fake go log");
+  if (log_fd < 0) {
+    close(fake_fd);
+    unlink(fake_go);
+    restore_env("GO_BIN", prev_go_bin);
+    restore_env("HOLONS_FAKE_GO_LOG", prev_log);
+    restore_env("GOCACHE", prev_gocache);
+    return;
+  }
+
+  script = fdopen(fake_fd, "w");
+  check_int(script != NULL, "fdopen fake go binary");
+  if (script == NULL) {
+    close(fake_fd);
+    close(log_fd);
+    unlink(fake_go);
+    unlink(fake_log);
+    restore_env("GO_BIN", prev_go_bin);
+    restore_env("HOLONS_FAKE_GO_LOG", prev_log);
+    restore_env("GOCACHE", prev_gocache);
+    return;
+  }
+
+  fprintf(script,
+          "#!/usr/bin/env bash\n"
+          "set -euo pipefail\n"
+          ": \"${HOLONS_FAKE_GO_LOG:?missing HOLONS_FAKE_GO_LOG}\"\n"
+          "{\n"
+          "  printf 'PWD=%%s\\n' \"$PWD\"\n"
+          "  i=0\n"
+          "  for arg in \"$@\"; do\n"
+          "    printf 'ARG%%d=%%s\\n' \"$i\" \"$arg\"\n"
+          "    i=$((i+1))\n"
+          "  done\n"
+          "} >\"$HOLONS_FAKE_GO_LOG\"\n");
+
+  (void)fclose(script);
+  script = NULL;
+  check_int(chmod(fake_go, 0700) == 0, "chmod fake go binary");
+  (void)close(log_fd);
+  log_fd = -1;
+
+  (void)setenv("GO_BIN", fake_go, 1);
+  (void)setenv("HOLONS_FAKE_GO_LOG", fake_log, 1);
+  (void)unsetenv("GOCACHE");
+
+  capture[0] = '\0';
+  exit_code = command_exit_code("./bin/echo-client stdio:// --message cert-stdio >/dev/null 2>&1");
+  check_int(exit_code == 0, "echo-client wrapper exit");
+  check_int(read_file(fake_log, capture, sizeof(capture)) == 0, "read echo-client wrapper capture");
+  if (capture[0] != '\0') {
+    check_int(strstr(capture, "PWD=") != NULL && strstr(capture, "/sdk/go-holons") != NULL,
+              "echo-client wrapper cwd");
+    check_int(strstr(capture, "ARG0=run") != NULL, "echo-client wrapper uses go run");
+    check_int(strstr(capture, "echo-client-go/main.go") != NULL, "echo-client wrapper helper path");
+    check_int(strstr(capture, "--sdk") != NULL && strstr(capture, "c-holons") != NULL,
+              "echo-client wrapper sdk default");
+    check_int(strstr(capture, "--server-sdk") != NULL && strstr(capture, "go-holons") != NULL,
+              "echo-client wrapper server sdk default");
+    check_int(strstr(capture, "stdio://") != NULL, "echo-client wrapper forwards URI");
+    check_int(strstr(capture, "--message") != NULL && strstr(capture, "cert-stdio") != NULL,
+              "echo-client wrapper forwards message");
+  }
+
+  capture[0] = '\0';
+  exit_code = command_exit_code("./bin/echo-server --listen stdio:// >/dev/null 2>&1");
+  check_int(exit_code == 0, "echo-server wrapper exit");
+  check_int(read_file(fake_log, capture, sizeof(capture)) == 0, "read echo-server wrapper capture");
+  if (capture[0] != '\0') {
+    check_int(strstr(capture, "PWD=") != NULL && strstr(capture, "/sdk/go-holons") != NULL,
+              "echo-server wrapper cwd");
+    check_int(strstr(capture, "ARG0=run") != NULL, "echo-server wrapper uses go run");
+    check_int(strstr(capture, "ARG1=./cmd/echo-server") != NULL, "echo-server wrapper command path");
+    check_int(strstr(capture, "--sdk") != NULL && strstr(capture, "c-holons") != NULL,
+              "echo-server wrapper sdk default");
+    check_int(strstr(capture, "--listen") != NULL && strstr(capture, "stdio://") != NULL,
+              "echo-server wrapper forwards listen URI");
+  }
+
+  unlink(fake_go);
+  unlink(fake_log);
+  restore_env("GO_BIN", prev_go_bin);
+  restore_env("HOLONS_FAKE_GO_LOG", prev_log);
+  restore_env("GOCACHE", prev_gocache);
 }
 
 static void test_scheme_and_flags(void) {
@@ -441,6 +624,9 @@ static void test_serve_stdio(void) {
 }
 
 int main(void) {
+  test_certification_declarations();
+  test_echo_scripts_exist();
+  test_echo_wrapper_invocation();
   test_scheme_and_flags();
   test_uri_parsing();
   test_identity_parsing();
