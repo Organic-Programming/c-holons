@@ -1,34 +1,37 @@
 {
-  "sdk": "c-holons",
-  "lang": "c",
-  "version": "0.1.0",
+  "capabilities": {
+    "bidirectional": true,
+    "grpc_dial_stdio": true,
+    "grpc_dial_tcp": true,
+    "grpc_dial_unix": false,
+    "grpc_dial_ws": true,
+    "grpc_listen_mem": true,
+    "grpc_listen_stdio": true,
+    "grpc_listen_tcp": true,
+    "grpc_listen_unix": true,
+    "grpc_reject_oversize": true,
+    "holon_rpc_client": true,
+    "holon_rpc_reconnect": true,
+    "holon_rpc_server": true,
+    "routing": [
+      "unicast",
+      "fanout"
+    ],
+    "valence": "multi"
+  },
   "executables": {
-    "echo_server": "./bin/echo-server",
     "echo_client": "./bin/echo-client",
+    "echo_server": "./bin/echo-server",
     "holon_rpc_client": "./bin/holon-rpc-client",
     "holon_rpc_server": "./bin/holon-rpc-server"
   },
-  "capabilities": {
-    "grpc_listen_tcp": true,
-    "grpc_listen_stdio": true,
-    "grpc_listen_unix": true,
-    "grpc_listen_mem": true,
-    "grpc_dial_tcp": true,
-    "grpc_dial_stdio": true,
-    "grpc_dial_unix": false,
-    "grpc_dial_ws": true,
-    "holon_rpc_client": true,
-    "holon_rpc_server": true,
-    "holon_rpc_reconnect": true,
-    "grpc_reject_oversize": true,
-    "bidirectional": true,
-    "valence": "multi",
-    "routing": ["unicast", "fanout"]
-  },
+  "lang": "c",
   "last_certified": {
-    "commit": "01c48364b8da70d594d11ae9cd8095e2002036a3",
-    "date": "2026-02-15",
+    "commit": "daad4252d682dd3a8e3ce05a1215fc75f64de15c",
+    "date": "2026-02-16",
     "level": 5
   },
-  "role": "client"
+  "role": "client",
+  "sdk": "c-holons",
+  "version": "0.1.0"
 }
