@@ -1,14 +1,3 @@
----
-# Cartouche v1
-title: "c-holons - C SDK for Organic Programming"
-author:
-  name: "B. ALTER"
-created: 2026-02-12
-access:
-  humans: true
-  agents: false
-status: draft
----
 # c-holons
 
 C SDK for Organic Programming.

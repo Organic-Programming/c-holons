@@ -1,21 +1,3 @@
----
-# Cartouche v1
-title: "c-holons - Agent Directives"
-author:
-  name: "B. ALTER"
-  copyright: "© 2026 Benoit Pereira da Silva"
-created: 2026-02-12
-revised: 2026-02-12
-lang: en-US
-origin_lang: en-US
-translation_of: null
-translator: null
-access:
-  humans: true
-  agents: true
-status: draft
----
-
 # c-holons - Agent Directives
 
 `c-holons` is not a holon. It is a C SDK that mirrors the Go reference surface:
