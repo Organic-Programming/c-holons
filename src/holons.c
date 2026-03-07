@@ -895,8 +895,7 @@ int holons_serve(const char *listen_uri,
 int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size_t err_len) {
   FILE *f;
   char line[1024];
-  int saw_open = 0;
-  int saw_close = 0;
+  int saw_mapping = 0;
 
   if (path == NULL || out == NULL) {
     set_err(err, err_len, "path and output are required");
@@ -910,29 +909,11 @@ int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size
     return -1;
   }
 
-  if (fgets(line, sizeof(line), f) == NULL) {
-    set_err(err, err_len, "%s: empty file", path);
-    (void)fclose(f);
-    return -1;
-  }
-
-  if (strcmp(trim(line), "---") != 0) {
-    set_err(err, err_len, "%s: missing YAML frontmatter", path);
-    (void)fclose(f);
-    return -1;
-  }
-
-  saw_open = 1;
-
   while (fgets(line, sizeof(line), f) != NULL) {
     char *raw = trim(line);
     char *sep;
     char *value;
 
-    if (strcmp(raw, "---") == 0) {
-      saw_close = 1;
-      break;
-    }
     if (raw[0] == '\0' || raw[0] == '#') {
       continue;
     }
@@ -941,6 +922,7 @@ int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size
     if (sep == NULL) {
       continue;
     }
+    saw_mapping = 1;
     *sep = '\0';
 
     value = trim(sep + 1);
@@ -972,8 +954,8 @@ int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size
 
   (void)fclose(f);
 
-  if (!saw_open || !saw_close) {
-    set_err(err, err_len, "%s: unterminated YAML frontmatter", path);
+  if (!saw_mapping) {
+    set_err(err, err_len, "%s: holon.yaml must be a YAML mapping", path);
     return -1;
   }
 

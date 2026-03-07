@@ -20,9 +20,9 @@ clang -std=c11 -Wall -Wextra -pedantic -I include src/holons.c test/holons_test.
 ./test_runner
 ```
 
-## Certification executables
+## Wrapper executables
 
-`cert.json` declares runnable wrappers:
+The SDK ships runnable wrappers:
 
 - `./bin/echo-server`
 - `./bin/echo-client`

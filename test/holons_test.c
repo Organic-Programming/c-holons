@@ -133,37 +133,6 @@ static void restore_env(const char *name, char *value) {
   (void)unsetenv(name);
 }
 
-static void test_certification_declarations(void) {
-  char raw[2048];
-  int rc;
-
-  rc = read_file("cert.json", raw, sizeof(raw));
-  check_int(rc == 0, "read cert.json");
-  if (rc != 0) {
-    return;
-  }
-  check_int(strstr(raw, "\"echo_server\": \"./bin/echo-server\"") != NULL,
-            "cert echo_server declaration");
-  check_int(strstr(raw, "\"echo_client\": \"./bin/echo-client\"") != NULL,
-            "cert echo_client declaration");
-  check_int(strstr(raw, "\"holon_rpc_client\": \"./bin/holon-rpc-client\"") != NULL,
-            "cert holon_rpc_client declaration");
-  check_int(strstr(raw, "\"holon_rpc_server\": \"./bin/holon-rpc-server\"") != NULL,
-            "cert holon_rpc_server declaration");
-  check_int(strstr(raw, "\"grpc_dial_tcp\": true") != NULL, "cert grpc_dial_tcp declaration");
-  check_int(strstr(raw, "\"grpc_dial_stdio\": true") != NULL, "cert grpc_dial_stdio declaration");
-  check_int(strstr(raw, "\"grpc_dial_ws\": true") != NULL, "cert grpc_dial_ws declaration");
-  check_int(strstr(raw, "\"holon_rpc_client\": true") != NULL, "cert holon_rpc_client capability");
-  check_int(strstr(raw, "\"holon_rpc_server\": true") != NULL, "cert holon_rpc_server capability");
-  check_int(strstr(raw, "\"holon_rpc_reconnect\": true") != NULL,
-            "cert holon_rpc_reconnect capability");
-  check_int(strstr(raw, "\"grpc_reject_oversize\": true") != NULL,
-            "cert grpc_reject_oversize capability");
-  check_int(strstr(raw, "\"bidirectional\": true") != NULL, "cert bidirectional capability");
-  check_int(strstr(raw, "\"valence\": \"multi\"") != NULL, "cert valence declaration");
-  check_int(strstr(raw, "\"routing\": [\"unicast\", \"fanout\"]") != NULL, "cert routing declaration");
-}
-
 static void test_echo_scripts_exist(void) {
   check_int(access("./bin/echo-client", F_OK) == 0, "echo-client script exists");
   check_int(access("./bin/echo-server", F_OK) == 0, "echo-server script exists");
@@ -430,7 +399,6 @@ static void test_identity_parsing(void) {
   }
 
   fprintf(f,
-          "---\n"
           "uuid: \"abc-123\"\n"
           "given_name: \"demo\"\n"
           "family_name: \"Holons\"\n"
@@ -439,9 +407,7 @@ static void test_identity_parsing(void) {
           "clade: \"deterministic/pure\"\n"
           "status: draft\n"
           "born: \"2026-02-12\"\n"
-          "lang: \"c\"\n"
-          "---\n"
-          "# test\n");
+          "lang: \"c\"\n");
   fclose(f);
 
   check_int(holons_parse_holon(path, &id, err, sizeof(err)) == 0, "parse_holon");
@@ -912,7 +878,6 @@ static void test_serve_stdio(void) {
 }
 
 int main(void) {
-  test_certification_declarations();
   test_echo_scripts_exist();
   test_echo_wrapper_invocation();
   test_scheme_and_flags();
