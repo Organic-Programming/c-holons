@@ -562,6 +562,56 @@ static void write_discovery_holon(const char *dir,
   fclose(f);
 }
 
+static void write_echo_holon(const char *root) {
+  char proto_dir[1024];
+  char proto_path[1024];
+  char holon_path[1024];
+  char cmd[1200];
+  FILE *f;
+
+  snprintf(proto_dir, sizeof(proto_dir), "%s/protos/echo/v1", root);
+  snprintf(proto_path, sizeof(proto_path), "%s/echo.proto", proto_dir);
+  snprintf(holon_path, sizeof(holon_path), "%s/holon.yaml", root);
+  snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", proto_dir);
+  assert(system(cmd) == 0);
+
+  f = fopen(holon_path, "w");
+  assert(f != NULL);
+  fprintf(f,
+          "given_name: Echo\n"
+          "family_name: Server\n"
+          "motto: Reply precisely.\n");
+  fclose(f);
+
+  f = fopen(proto_path, "w");
+  assert(f != NULL);
+  fprintf(f,
+          "syntax = \"proto3\";\n"
+          "package echo.v1;\n\n"
+          "// Echo echoes request payloads for documentation tests.\n"
+          "service Echo {\n"
+          "  // Ping echoes the inbound message.\n"
+          "  // @example {\"message\":\"hello\",\"sdk\":\"go-holons\"}\n"
+          "  rpc Ping(PingRequest) returns (PingResponse);\n"
+          "}\n\n"
+          "message PingRequest {\n"
+          "  // Message to echo back.\n"
+          "  // @required\n"
+          "  // @example \"hello\"\n"
+          "  string message = 1;\n\n"
+          "  // SDK marker included in the response.\n"
+          "  // @example \"go-holons\"\n"
+          "  string sdk = 2;\n"
+          "}\n\n"
+          "message PingResponse {\n"
+          "  // Echoed message.\n"
+          "  string message = 1;\n\n"
+          "  // SDK marker from the server.\n"
+          "  string sdk = 2;\n"
+          "}\n");
+  fclose(f);
+}
+
 static void discovery_path(char *out, size_t out_len, const char *root, const char *suffix) {
   assert(out != NULL);
   assert(root != NULL);
@@ -643,6 +693,141 @@ static void test_discover(void) {
   check_int(chdir(cwd) == 0, "restore cwd");
   snprintf(err, sizeof(err), "rm -rf '%s'", root);
   (void)system(err);
+}
+
+static void test_describe_response(void) {
+  char root[] = "/tmp/holons_describe_c_XXXXXX";
+  char proto_dir[1024];
+  char holon_yaml[1024];
+  char cleanup_cmd[1200];
+  char err[256];
+  holons_describe_response_t response;
+
+  check_int(make_temp_dir(root) == 0, "mk describe temp dir");
+  write_echo_holon(root);
+  snprintf(proto_dir, sizeof(proto_dir), "%s/protos", root);
+  snprintf(holon_yaml, sizeof(holon_yaml), "%s/holon.yaml", root);
+
+  memset(&response, 0, sizeof(response));
+  err[0] = '\0';
+  check_int(holons_build_describe_response(proto_dir, holon_yaml, &response, err, sizeof(err)) == 0,
+            "describe build response");
+  check_int(strcmp(response.slug, "echo-server") == 0, "describe slug");
+  check_int(strcmp(response.motto, "Reply precisely.") == 0, "describe motto");
+  check_int(response.service_count == 1, "describe service count");
+  if (response.service_count == 1) {
+    holons_service_doc_t *service = &response.services[0];
+    check_int(strcmp(service->name, "echo.v1.Echo") == 0, "describe service name");
+    check_int(strcmp(service->description,
+                     "Echo echoes request payloads for documentation tests.") == 0,
+              "describe service description");
+    check_int(service->method_count == 1, "describe method count");
+    if (service->method_count == 1) {
+      holons_method_doc_t *method = &service->methods[0];
+      check_int(strcmp(method->name, "Ping") == 0, "describe method name");
+      check_int(strcmp(method->description, "Ping echoes the inbound message.") == 0,
+                "describe method description");
+      check_int(strcmp(method->input_type, "echo.v1.PingRequest") == 0, "describe input type");
+      check_int(strcmp(method->output_type, "echo.v1.PingResponse") == 0, "describe output type");
+      check_int(strcmp(method->example_input, "{\"message\":\"hello\",\"sdk\":\"go-holons\"}") == 0,
+                "describe method example");
+      check_int(method->input_field_count == 2, "describe input field count");
+      if (method->input_field_count >= 1) {
+        holons_field_doc_t *field = &method->input_fields[0];
+        check_int(strcmp(field->name, "message") == 0, "describe field name");
+        check_int(strcmp(field->type, "string") == 0, "describe field type");
+        check_int(field->number == 1, "describe field number");
+        check_int(strcmp(field->description, "Message to echo back.") == 0,
+                  "describe field description");
+        check_int(field->label == HOLONS_FIELD_LABEL_REQUIRED, "describe field label");
+        check_int(field->required == 1, "describe field required");
+        check_int(strcmp(field->example, "\"hello\"") == 0, "describe field example");
+      }
+    }
+  }
+
+  holons_free_describe_response(&response);
+  snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
+  check_int(system(cleanup_cmd) == 0, "cleanup describe tmp root");
+}
+
+static void test_describe_registration(void) {
+  char root[] = "/tmp/holons_meta_reg_c_XXXXXX";
+  char proto_dir[1024];
+  char holon_yaml[1024];
+  char cleanup_cmd[1200];
+  char err[256];
+  holons_holonmeta_registration_t registration;
+  holons_describe_response_t response;
+  holons_describe_request_t request;
+
+  check_int(make_temp_dir(root) == 0, "mk registration temp dir");
+  write_echo_holon(root);
+  snprintf(proto_dir, sizeof(proto_dir), "%s/protos", root);
+  snprintf(holon_yaml, sizeof(holon_yaml), "%s/holon.yaml", root);
+
+  err[0] = '\0';
+  check_int(holons_make_holonmeta_registration(proto_dir,
+                                               holon_yaml,
+                                               &registration,
+                                               err,
+                                               sizeof(err)) == 0,
+            "holonmeta registration build");
+  check_int(strcmp(registration.service_name, "holonmeta.v1.HolonMeta") == 0,
+            "holonmeta registration service");
+  check_int(strcmp(registration.method_name, "Describe") == 0,
+            "holonmeta registration method");
+
+  memset(&response, 0, sizeof(response));
+  memset(&request, 0, sizeof(request));
+  err[0] = '\0';
+  check_int(holons_invoke_holonmeta_describe(&registration,
+                                             &request,
+                                             &response,
+                                             err,
+                                             sizeof(err)) == 0,
+            "holonmeta registration invoke");
+  check_int(strcmp(response.slug, "echo-server") == 0, "holonmeta registration slug");
+  check_int(response.service_count == 1, "holonmeta registration services");
+
+  holons_free_describe_response(&response);
+  snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
+  check_int(system(cleanup_cmd) == 0, "cleanup holonmeta registration tmp root");
+}
+
+static void test_describe_without_protos(void) {
+  char root[] = "/tmp/holons_describe_empty_c_XXXXXX";
+  char holon_yaml[1024];
+  char cleanup_cmd[1200];
+  char err[256];
+  FILE *f;
+  holons_describe_response_t response;
+
+  check_int(make_temp_dir(root) == 0, "mk empty describe temp dir");
+  snprintf(holon_yaml, sizeof(holon_yaml), "%s/holon.yaml", root);
+  f = fopen(holon_yaml, "w");
+  assert(f != NULL);
+  fprintf(f,
+          "given_name: Empty\n"
+          "family_name: Holon\n"
+          "motto: Still available.\n");
+  fclose(f);
+
+  memset(&response, 0, sizeof(response));
+  err[0] = '\0';
+  check_int(holons_build_describe_response("/tmp/this-path-does-not-exist",
+                                           holon_yaml,
+                                           &response,
+                                           err,
+                                           sizeof(err)) == 0,
+            "describe without protos");
+  check_int(strcmp(response.slug, "empty-holon") == 0, "describe empty slug");
+  check_int(strcmp(response.motto, "Still available.") == 0, "describe empty motto");
+  check_int(response.service_count == 0, "describe empty service count");
+
+  holons_free_describe_response(&response);
+  snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
+  check_int(system(cleanup_cmd) == 0, "cleanup empty describe tmp root");
 }
 
 static void test_connect_direct_dial(void) {
@@ -1681,6 +1866,9 @@ int main(void) {
   test_scheme_and_flags();
   test_uri_parsing();
   test_identity_parsing();
+  test_describe_response();
+  test_describe_registration();
+  test_describe_without_protos();
   test_tcp_transport();
   test_unix_transport();
   test_stdio_transport();

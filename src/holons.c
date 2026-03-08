@@ -2587,3 +2587,1451 @@ void holons_free_entries(holon_entry_t *entries) { free(entries); }
 volatile sig_atomic_t *holons_stop_token(void) { return &g_stop_requested; }
 
 void holons_request_stop(void) { g_stop_requested = 1; }
+
+#define HOLONS_META_SERVICE_NAME "holonmeta.v1.HolonMeta"
+#define HOLONS_MAX_COMMENT_LINES 32
+#define HOLONS_MAX_SCOPE_LEN HOLONS_MAX_FIELD_LEN
+#define HOLONS_SCALAR_TYPE_COUNT 15
+
+typedef struct {
+  char description[HOLONS_MAX_DOC_LEN];
+  int required;
+  char example[HOLONS_MAX_DOC_LEN];
+} holons_comment_meta_t;
+
+typedef enum {
+  HOLONS_CARDINALITY_OPTIONAL = 0,
+  HOLONS_CARDINALITY_REPEATED = 1,
+  HOLONS_CARDINALITY_MAP = 2
+} holons_cardinality_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  int number;
+  holons_comment_meta_t comment;
+} holons_enum_value_def_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char type_name[HOLONS_MAX_FIELD_LEN];
+  char raw_type[HOLONS_MAX_FIELD_LEN];
+  int number;
+  holons_comment_meta_t comment;
+  holons_cardinality_t cardinality;
+  char package_name[HOLONS_MAX_FIELD_LEN];
+  char scope[HOLONS_MAX_SCOPE_LEN];
+  char map_key_type[HOLONS_MAX_FIELD_LEN];
+  char map_value_type[HOLONS_MAX_FIELD_LEN];
+} holons_field_def_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char full_name[HOLONS_MAX_FIELD_LEN];
+  char package_name[HOLONS_MAX_FIELD_LEN];
+  char scope[HOLONS_MAX_SCOPE_LEN];
+  holons_comment_meta_t comment;
+  holons_field_def_t *fields;
+  size_t field_count;
+  size_t field_capacity;
+} holons_message_def_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char full_name[HOLONS_MAX_FIELD_LEN];
+  char package_name[HOLONS_MAX_FIELD_LEN];
+  char scope[HOLONS_MAX_SCOPE_LEN];
+  holons_comment_meta_t comment;
+  holons_enum_value_def_t *values;
+  size_t value_count;
+  size_t value_capacity;
+} holons_enum_def_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char input_type[HOLONS_MAX_FIELD_LEN];
+  char output_type[HOLONS_MAX_FIELD_LEN];
+  int client_streaming;
+  int server_streaming;
+  holons_comment_meta_t comment;
+} holons_method_def_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char full_name[HOLONS_MAX_FIELD_LEN];
+  holons_comment_meta_t comment;
+  holons_method_def_t *methods;
+  size_t method_count;
+  size_t method_capacity;
+} holons_service_def_t;
+
+typedef struct {
+  char key[HOLONS_MAX_FIELD_LEN];
+  char full_name[HOLONS_MAX_FIELD_LEN];
+} holons_simple_type_t;
+
+typedef struct {
+  holons_service_def_t *services;
+  size_t service_count;
+  size_t service_capacity;
+  holons_message_def_t *messages;
+  size_t message_count;
+  size_t message_capacity;
+  holons_enum_def_t *enums;
+  size_t enum_count;
+  size_t enum_capacity;
+  holons_simple_type_t *simple_types;
+  size_t simple_type_count;
+  size_t simple_type_capacity;
+} holons_proto_index_t;
+
+typedef struct {
+  int kind;
+  size_t index;
+  char name[HOLONS_MAX_FIELD_LEN];
+} holons_block_t;
+
+enum {
+  HOLONS_BLOCK_SERVICE = 1,
+  HOLONS_BLOCK_MESSAGE = 2,
+  HOLONS_BLOCK_ENUM = 3
+};
+
+static const char *holons_scalar_types[HOLONS_SCALAR_TYPE_COUNT] = {
+    "double",  "float",   "int64",   "uint64",  "int32",
+    "fixed64", "fixed32", "bool",    "string",  "bytes",
+    "uint32",  "sfixed32","sfixed64","sint32",  "sint64"};
+
+static void holons_init_describe_response(holons_describe_response_t *out) {
+  if (out != NULL) {
+    (void)memset(out, 0, sizeof(*out));
+  }
+}
+
+static void holons_free_field_docs(holons_field_doc_t *fields, size_t count) {
+  size_t i;
+  if (fields == NULL) {
+    return;
+  }
+  for (i = 0; i < count; ++i) {
+    holons_free_field_docs(fields[i].nested_fields, fields[i].nested_field_count);
+    free(fields[i].enum_values);
+  }
+  free(fields);
+}
+
+void holons_free_describe_response(holons_describe_response_t *response) {
+  size_t i;
+
+  if (response == NULL) {
+    return;
+  }
+  if (response->services != NULL) {
+    for (i = 0; i < response->service_count; ++i) {
+      size_t j;
+      for (j = 0; j < response->services[i].method_count; ++j) {
+        holons_free_field_docs(response->services[i].methods[j].input_fields,
+                               response->services[i].methods[j].input_field_count);
+        holons_free_field_docs(response->services[i].methods[j].output_fields,
+                               response->services[i].methods[j].output_field_count);
+      }
+      free(response->services[i].methods);
+    }
+    free(response->services);
+  }
+  (void)memset(response, 0, sizeof(*response));
+}
+
+static void holons_free_proto_index(holons_proto_index_t *index) {
+  size_t i;
+  if (index == NULL) {
+    return;
+  }
+  for (i = 0; i < index->service_count; ++i) {
+    free(index->services[i].methods);
+  }
+  for (i = 0; i < index->message_count; ++i) {
+    free(index->messages[i].fields);
+  }
+  for (i = 0; i < index->enum_count; ++i) {
+    free(index->enums[i].values);
+  }
+  free(index->services);
+  free(index->messages);
+  free(index->enums);
+  free(index->simple_types);
+  (void)memset(index, 0, sizeof(*index));
+}
+
+static int holons_is_scalar_type(const char *type_name) {
+  size_t i;
+  for (i = 0; i < HOLONS_SCALAR_TYPE_COUNT; ++i) {
+    if (strcmp(type_name, holons_scalar_types[i]) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int holons_ensure_capacity(void **items,
+                                  size_t *capacity,
+                                  size_t count,
+                                  size_t item_size,
+                                  char *err,
+                                  size_t err_len) {
+  size_t next_capacity;
+  void *grown;
+
+  if (count < *capacity) {
+    return 0;
+  }
+
+  next_capacity = (*capacity == 0) ? 4 : (*capacity * 2);
+  grown = realloc(*items, next_capacity * item_size);
+  if (grown == NULL) {
+    set_err(err, err_len, "out of memory");
+    return -1;
+  }
+
+  *items = grown;
+  *capacity = next_capacity;
+  return 0;
+}
+
+static void holons_clear_pending_comments(char comments[][HOLONS_MAX_DOC_LEN], size_t *count) {
+  size_t i;
+  if (count == NULL) {
+    return;
+  }
+  for (i = 0; i < *count; ++i) {
+    comments[i][0] = '\0';
+  }
+  *count = 0;
+}
+
+static void holons_append_comment_line(char comments[][HOLONS_MAX_DOC_LEN],
+                                       size_t *count,
+                                       const char *line) {
+  if (count == NULL || line == NULL) {
+    return;
+  }
+  if (*count >= HOLONS_MAX_COMMENT_LINES) {
+    return;
+  }
+  (void)copy_string(comments[*count], HOLONS_MAX_DOC_LEN, line, NULL, 0);
+  *count += 1;
+}
+
+static void holons_comment_meta_from_lines(const char comments[][HOLONS_MAX_DOC_LEN],
+                                           size_t count,
+                                           holons_comment_meta_t *out) {
+  size_t i;
+
+  (void)memset(out, 0, sizeof(*out));
+  for (i = 0; i < count; ++i) {
+    const char *line = comments[i];
+    if (strcmp(line, "@required") == 0) {
+      out->required = 1;
+      continue;
+    }
+    if (strncmp(line, "@example ", 9) == 0) {
+      (void)copy_string(out->example, sizeof(out->example), line + 9, NULL, 0);
+      continue;
+    }
+    if (line[0] != '\0') {
+      if (out->description[0] != '\0' &&
+          strlen(out->description) + 1 < sizeof(out->description)) {
+        strncat(out->description,
+                " ",
+                sizeof(out->description) - strlen(out->description) - 1);
+      }
+      if (strlen(out->description) + strlen(line) < sizeof(out->description)) {
+        strncat(out->description,
+                line,
+                sizeof(out->description) - strlen(out->description) - 1);
+      }
+    }
+  }
+}
+
+static int holons_parse_name_after_keyword(const char *line,
+                                           const char *keyword,
+                                           char *out,
+                                           size_t out_len) {
+  const char *p;
+  size_t n = 0;
+
+  if (line == NULL || keyword == NULL || out == NULL || out_len == 0) {
+    return 0;
+  }
+  if (strncmp(line, keyword, strlen(keyword)) != 0) {
+    return 0;
+  }
+  p = line + strlen(keyword);
+  while (*p != '\0' && isspace((unsigned char)*p)) {
+    ++p;
+  }
+  while (*p != '\0' &&
+         (isalnum((unsigned char)*p) || *p == '_' || *p == '.')) {
+    if (n + 1 >= out_len) {
+      return 0;
+    }
+    out[n++] = *p++;
+  }
+  out[n] = '\0';
+  return n > 0;
+}
+
+static int holons_parse_package_line(const char *line, char *out, size_t out_len) {
+  char name[HOLONS_MAX_FIELD_LEN];
+  if (!holons_parse_name_after_keyword(line, "package", name, sizeof(name))) {
+    return 0;
+  }
+  return copy_string(out, out_len, name, NULL, 0) == 0;
+}
+
+static int holons_parse_rpc_line(const char *line,
+                                 char *name,
+                                 size_t name_len,
+                                 char *input_type,
+                                 size_t input_len,
+                                 int *client_streaming,
+                                 char *output_type,
+                                 size_t output_len,
+                                 int *server_streaming) {
+  const char *p;
+  const char *open_paren;
+  const char *close_paren;
+  const char *returns_kw;
+  const char *out_open;
+  const char *out_close;
+  char in_buf[HOLONS_MAX_FIELD_LEN];
+  char out_buf[HOLONS_MAX_FIELD_LEN];
+  size_t n = 0;
+
+  if (strncmp(line, "rpc ", 4) != 0) {
+    return 0;
+  }
+  p = line + 4;
+  while (*p != '\0' && isspace((unsigned char)*p)) {
+    ++p;
+  }
+  while (*p != '\0' &&
+         (isalnum((unsigned char)*p) || *p == '_' || *p == '.')) {
+    if (n + 1 >= name_len) {
+      return 0;
+    }
+    name[n++] = *p++;
+  }
+  name[n] = '\0';
+  if (name[0] == '\0') {
+    return 0;
+  }
+
+  open_paren = strchr(p, '(');
+  close_paren = open_paren != NULL ? strchr(open_paren + 1, ')') : NULL;
+  returns_kw = close_paren != NULL ? strstr(close_paren, "returns") : NULL;
+  out_open = returns_kw != NULL ? strchr(returns_kw, '(') : NULL;
+  out_close = out_open != NULL ? strchr(out_open + 1, ')') : NULL;
+  if (open_paren == NULL || close_paren == NULL || out_open == NULL || out_close == NULL) {
+    return 0;
+  }
+
+  n = (size_t)(close_paren - open_paren - 1);
+  if (n >= sizeof(in_buf)) {
+    return 0;
+  }
+  memcpy(in_buf, open_paren + 1, n);
+  in_buf[n] = '\0';
+  n = (size_t)(out_close - out_open - 1);
+  if (n >= sizeof(out_buf)) {
+    return 0;
+  }
+  memcpy(out_buf, out_open + 1, n);
+  out_buf[n] = '\0';
+
+  p = trim(in_buf);
+  *client_streaming = 0;
+  if (strncmp(p, "stream ", 7) == 0) {
+    *client_streaming = 1;
+    p = trim((char *)(p + 7));
+  }
+  if (copy_string(input_type, input_len, p, NULL, 0) != 0) {
+    return 0;
+  }
+
+  p = trim(out_buf);
+  *server_streaming = 0;
+  if (strncmp(p, "stream ", 7) == 0) {
+    *server_streaming = 1;
+    p = trim((char *)(p + 7));
+  }
+  if (copy_string(output_type, output_len, p, NULL, 0) != 0) {
+    return 0;
+  }
+
+  return 1;
+}
+
+static int holons_parse_map_field_line(const char *line,
+                                       char *key_type,
+                                       size_t key_len,
+                                       char *value_type,
+                                       size_t value_len,
+                                       char *name,
+                                       size_t name_len,
+                                       int *number) {
+  char buf[1024];
+  char *p;
+  char *lt;
+  char *comma;
+  char *gt;
+  char *eq;
+  char *value;
+
+  if (copy_string(buf, sizeof(buf), line, NULL, 0) != 0) {
+    return 0;
+  }
+  p = trim(buf);
+  if (strncmp(p, "repeated ", 9) == 0) {
+    p = trim(p + 9);
+  }
+  if (strncmp(p, "map", 3) != 0) {
+    return 0;
+  }
+  lt = strchr(p, '<');
+  comma = lt != NULL ? strchr(lt + 1, ',') : NULL;
+  gt = comma != NULL ? strchr(comma + 1, '>') : NULL;
+  eq = gt != NULL ? strchr(gt + 1, '=') : NULL;
+  if (lt == NULL || comma == NULL || gt == NULL || eq == NULL) {
+    return 0;
+  }
+
+  *comma = '\0';
+  *gt = '\0';
+  *eq = '\0';
+  if (copy_string(key_type, key_len, trim(lt + 1), NULL, 0) != 0) {
+    return 0;
+  }
+  if (copy_string(value_type, value_len, trim(comma + 1), NULL, 0) != 0) {
+    return 0;
+  }
+  if (copy_string(name, name_len, trim(gt + 1), NULL, 0) != 0) {
+    return 0;
+  }
+  value = trim(eq + 1);
+  if (value[0] == '\0') {
+    return 0;
+  }
+  if (sscanf(value, "%d", number) != 1) {
+    return 0;
+  }
+  return 1;
+}
+
+static int holons_parse_field_line(const char *line,
+                                   char *type_name,
+                                   size_t type_len,
+                                   char *name,
+                                   size_t name_len,
+                                   int *number,
+                                   holons_cardinality_t *cardinality) {
+  char buf[1024];
+  char *p;
+  char *space;
+  char *eq;
+  char *value;
+
+  if (copy_string(buf, sizeof(buf), line, NULL, 0) != 0) {
+    return 0;
+  }
+  p = trim(buf);
+  if (strncmp(p, "repeated ", 9) == 0) {
+    *cardinality = HOLONS_CARDINALITY_REPEATED;
+    p = trim(p + 9);
+  } else if (strncmp(p, "optional ", 9) == 0) {
+    *cardinality = HOLONS_CARDINALITY_OPTIONAL;
+    p = trim(p + 9);
+  } else {
+    *cardinality = HOLONS_CARDINALITY_OPTIONAL;
+  }
+  if (strncmp(p, "map", 3) == 0) {
+    return 0;
+  }
+  space = strchr(p, ' ');
+  eq = strchr(p, '=');
+  if (space == NULL || eq == NULL || space > eq) {
+    return 0;
+  }
+  *space = '\0';
+  if (copy_string(type_name, type_len, trim(p), NULL, 0) != 0) {
+    return 0;
+  }
+  *eq = '\0';
+  if (copy_string(name, name_len, trim(space + 1), NULL, 0) != 0) {
+    return 0;
+  }
+  value = trim(eq + 1);
+  if (sscanf(value, "%d", number) != 1) {
+    return 0;
+  }
+  return 1;
+}
+
+static int holons_parse_enum_value_line(const char *line,
+                                        char *name,
+                                        size_t name_len,
+                                        int *number) {
+  char buf[1024];
+  char *eq;
+  char *value;
+
+  if (copy_string(buf, sizeof(buf), line, NULL, 0) != 0) {
+    return 0;
+  }
+  eq = strchr(buf, '=');
+  if (eq == NULL) {
+    return 0;
+  }
+  *eq = '\0';
+  if (copy_string(name, name_len, trim(buf), NULL, 0) != 0) {
+    return 0;
+  }
+  value = trim(eq + 1);
+  if (sscanf(value, "%d", number) != 1) {
+    return 0;
+  }
+  return 1;
+}
+
+static void holons_scope_from_stack(const holons_block_t *stack,
+                                    size_t stack_count,
+                                    char *out,
+                                    size_t out_len) {
+  size_t i;
+  out[0] = '\0';
+  for (i = 0; i < stack_count; ++i) {
+    if (stack[i].kind != HOLONS_BLOCK_MESSAGE) {
+      continue;
+    }
+    if (out[0] != '\0' && strlen(out) + 1 < out_len) {
+      strncat(out, ".", out_len - strlen(out) - 1);
+    }
+    if (strlen(out) + strlen(stack[i].name) < out_len) {
+      strncat(out, stack[i].name, out_len - strlen(out) - 1);
+    }
+  }
+}
+
+static void holons_qualify_scope(const char *scope,
+                                 const char *name,
+                                 char *out,
+                                 size_t out_len) {
+  if (scope == NULL || scope[0] == '\0') {
+    (void)copy_string(out, out_len, name, NULL, 0);
+    return;
+  }
+  (void)snprintf(out, out_len, "%s.%s", scope, name);
+}
+
+static ssize_t holons_find_message_index(const holons_proto_index_t *index,
+                                         const char *full_name) {
+  size_t i;
+  for (i = 0; i < index->message_count; ++i) {
+    if (strcmp(index->messages[i].full_name, full_name) == 0) {
+      return (ssize_t)i;
+    }
+  }
+  return -1;
+}
+
+static ssize_t holons_find_enum_index(const holons_proto_index_t *index,
+                                      const char *full_name) {
+  size_t i;
+  for (i = 0; i < index->enum_count; ++i) {
+    if (strcmp(index->enums[i].full_name, full_name) == 0) {
+      return (ssize_t)i;
+    }
+  }
+  return -1;
+}
+
+static void holons_add_simple_type(holons_proto_index_t *index,
+                                   const char *key,
+                                   const char *full_name,
+                                   char *err,
+                                   size_t err_len) {
+  size_t i;
+  if (key == NULL || key[0] == '\0' || full_name == NULL || full_name[0] == '\0') {
+    return;
+  }
+  for (i = 0; i < index->simple_type_count; ++i) {
+    if (strcmp(index->simple_types[i].key, key) == 0) {
+      return;
+    }
+  }
+  if (holons_ensure_capacity((void **)&index->simple_types,
+                             &index->simple_type_capacity,
+                             index->simple_type_count,
+                             sizeof(*index->simple_types),
+                             err,
+                             err_len) != 0) {
+    return;
+  }
+  (void)memset(&index->simple_types[index->simple_type_count], 0,
+               sizeof(index->simple_types[index->simple_type_count]));
+  (void)copy_string(index->simple_types[index->simple_type_count].key,
+                    sizeof(index->simple_types[index->simple_type_count].key),
+                    key,
+                    NULL,
+                    0);
+  (void)copy_string(index->simple_types[index->simple_type_count].full_name,
+                    sizeof(index->simple_types[index->simple_type_count].full_name),
+                    full_name,
+                    NULL,
+                    0);
+  index->simple_type_count += 1;
+}
+
+static int holons_find_simple_type(const holons_proto_index_t *index,
+                                   const char *key,
+                                   char *out,
+                                   size_t out_len) {
+  size_t i;
+  for (i = 0; i < index->simple_type_count; ++i) {
+    if (strcmp(index->simple_types[i].key, key) == 0) {
+      return copy_string(out, out_len, index->simple_types[i].full_name, NULL, 0);
+    }
+  }
+  return -1;
+}
+
+static void holons_resolve_type(const char *type_name,
+                                const char *package_name,
+                                const char *scope,
+                                const holons_proto_index_t *index,
+                                char *out,
+                                size_t out_len) {
+  char candidate[HOLONS_MAX_FIELD_LEN];
+  char scope_buf[HOLONS_MAX_SCOPE_LEN];
+  char *last_dot;
+
+  if (type_name == NULL || type_name[0] == '\0') {
+    out[0] = '\0';
+    return;
+  }
+  if (type_name[0] == '.') {
+    (void)copy_string(out, out_len, type_name + 1, NULL, 0);
+    return;
+  }
+  if (holons_is_scalar_type(type_name)) {
+    (void)copy_string(out, out_len, type_name, NULL, 0);
+    return;
+  }
+
+  (void)copy_string(scope_buf, sizeof(scope_buf), scope != NULL ? scope : "", NULL, 0);
+  while (scope_buf[0] != '\0') {
+    char qualified[HOLONS_MAX_FIELD_LEN];
+    holons_qualify_scope(scope_buf, type_name, qualified, sizeof(qualified));
+    (void)snprintf(candidate,
+                   sizeof(candidate),
+                   "%s%s%s",
+                   package_name != NULL && package_name[0] != '\0' ? package_name : "",
+                   package_name != NULL && package_name[0] != '\0' ? "." : "",
+                   qualified);
+    if (holons_find_message_index(index, candidate) >= 0 ||
+        holons_find_enum_index(index, candidate) >= 0) {
+      (void)copy_string(out, out_len, candidate, NULL, 0);
+      return;
+    }
+    last_dot = strrchr(scope_buf, '.');
+    if (last_dot == NULL) {
+      scope_buf[0] = '\0';
+    } else {
+      *last_dot = '\0';
+    }
+  }
+
+  if (package_name != NULL && package_name[0] != '\0') {
+    (void)snprintf(candidate, sizeof(candidate), "%s.%s", package_name, type_name);
+  } else {
+    (void)copy_string(candidate, sizeof(candidate), type_name, NULL, 0);
+  }
+  if (holons_find_message_index(index, candidate) >= 0 ||
+      holons_find_enum_index(index, candidate) >= 0) {
+    (void)copy_string(out, out_len, candidate, NULL, 0);
+    return;
+  }
+  if (holons_find_simple_type(index, type_name, out, out_len) == 0) {
+    return;
+  }
+  (void)copy_string(out, out_len, candidate, NULL, 0);
+}
+
+static int holons_parse_proto_file(const char *path,
+                                   holons_proto_index_t *index,
+                                   char *err,
+                                   size_t err_len) {
+  FILE *f;
+  char line[1024];
+  char package_name[HOLONS_MAX_FIELD_LEN] = "";
+  holons_block_t stack[32];
+  size_t stack_count = 0;
+  char pending_comments[HOLONS_MAX_COMMENT_LINES][HOLONS_MAX_DOC_LEN];
+  size_t pending_count = 0;
+
+  f = fopen(path, "r");
+  if (f == NULL) {
+    set_err(err, err_len, "cannot open %s: %s", path, strerror(errno));
+    return -1;
+  }
+
+  while (fgets(line, sizeof(line), f) != NULL) {
+    char raw[1024];
+    char *value;
+    char name[HOLONS_MAX_FIELD_LEN];
+    char scope[HOLONS_MAX_SCOPE_LEN];
+    holons_comment_meta_t comment;
+
+    (void)copy_string(raw, sizeof(raw), line, NULL, 0);
+    value = trim(raw);
+    if (value[0] == '\0') {
+      continue;
+    }
+    if (strncmp(value, "//", 2) == 0) {
+      holons_append_comment_line(pending_comments, &pending_count, trim(value + 2));
+      continue;
+    }
+
+    if (holons_parse_package_line(value, package_name, sizeof(package_name))) {
+      holons_clear_pending_comments(pending_comments, &pending_count);
+      continue;
+    }
+    if (holons_parse_name_after_keyword(value, "service", name, sizeof(name))) {
+      holons_service_def_t *service;
+      if (holons_ensure_capacity((void **)&index->services,
+                                 &index->service_capacity,
+                                 index->service_count,
+                                 sizeof(*index->services),
+                                 err,
+                                 err_len) != 0) {
+        (void)fclose(f);
+        return -1;
+      }
+      service = &index->services[index->service_count];
+      (void)memset(service, 0, sizeof(*service));
+      holons_comment_meta_from_lines(pending_comments, pending_count, &comment);
+      (void)copy_string(service->name, sizeof(service->name), name, NULL, 0);
+      if (package_name[0] != '\0') {
+        (void)snprintf(service->full_name, sizeof(service->full_name), "%s.%s", package_name, name);
+      } else {
+        (void)copy_string(service->full_name, sizeof(service->full_name), name, NULL, 0);
+      }
+      service->comment = comment;
+      if (stack_count < sizeof(stack) / sizeof(stack[0])) {
+        (void)memset(&stack[stack_count], 0, sizeof(stack[stack_count]));
+        stack[stack_count].kind = HOLONS_BLOCK_SERVICE;
+        stack[stack_count].index = index->service_count;
+        (void)copy_string(stack[stack_count].name, sizeof(stack[stack_count].name), name, NULL, 0);
+        stack_count += 1;
+      }
+      index->service_count += 1;
+      holons_clear_pending_comments(pending_comments, &pending_count);
+      holons_trim_closed_blocks:
+      {
+        size_t closes = 0;
+        size_t i;
+        for (i = 0; value[i] != '\0'; ++i) {
+          if (value[i] == '}') {
+            closes += 1;
+          }
+        }
+        while (closes > 0 && stack_count > 0) {
+          stack_count -= 1;
+          closes -= 1;
+        }
+      }
+      continue;
+    }
+    if (holons_parse_name_after_keyword(value, "message", name, sizeof(name))) {
+      holons_message_def_t *message;
+      char qualified[HOLONS_MAX_FIELD_LEN];
+      holons_scope_from_stack(stack, stack_count, scope, sizeof(scope));
+      holons_qualify_scope(scope, name, qualified, sizeof(qualified));
+      if (holons_ensure_capacity((void **)&index->messages,
+                                 &index->message_capacity,
+                                 index->message_count,
+                                 sizeof(*index->messages),
+                                 err,
+                                 err_len) != 0) {
+        (void)fclose(f);
+        return -1;
+      }
+      message = &index->messages[index->message_count];
+      (void)memset(message, 0, sizeof(*message));
+      holons_comment_meta_from_lines(pending_comments, pending_count, &comment);
+      (void)copy_string(message->name, sizeof(message->name), name, NULL, 0);
+      (void)copy_string(message->package_name, sizeof(message->package_name), package_name, NULL, 0);
+      (void)copy_string(message->scope, sizeof(message->scope), scope, NULL, 0);
+      if (package_name[0] != '\0') {
+        (void)snprintf(message->full_name, sizeof(message->full_name), "%s.%s", package_name, qualified);
+      } else {
+        (void)copy_string(message->full_name, sizeof(message->full_name), qualified, NULL, 0);
+      }
+      message->comment = comment;
+      holons_add_simple_type(index, message->name, message->full_name, err, err_len);
+      holons_add_simple_type(index, qualified, message->full_name, err, err_len);
+      if (stack_count < sizeof(stack) / sizeof(stack[0])) {
+        (void)memset(&stack[stack_count], 0, sizeof(stack[stack_count]));
+        stack[stack_count].kind = HOLONS_BLOCK_MESSAGE;
+        stack[stack_count].index = index->message_count;
+        (void)copy_string(stack[stack_count].name, sizeof(stack[stack_count].name), name, NULL, 0);
+        stack_count += 1;
+      }
+      index->message_count += 1;
+      holons_clear_pending_comments(pending_comments, &pending_count);
+      goto holons_trim_closed_blocks;
+    }
+    if (holons_parse_name_after_keyword(value, "enum", name, sizeof(name))) {
+      holons_enum_def_t *enum_def;
+      char qualified[HOLONS_MAX_FIELD_LEN];
+      holons_scope_from_stack(stack, stack_count, scope, sizeof(scope));
+      holons_qualify_scope(scope, name, qualified, sizeof(qualified));
+      if (holons_ensure_capacity((void **)&index->enums,
+                                 &index->enum_capacity,
+                                 index->enum_count,
+                                 sizeof(*index->enums),
+                                 err,
+                                 err_len) != 0) {
+        (void)fclose(f);
+        return -1;
+      }
+      enum_def = &index->enums[index->enum_count];
+      (void)memset(enum_def, 0, sizeof(*enum_def));
+      holons_comment_meta_from_lines(pending_comments, pending_count, &comment);
+      (void)copy_string(enum_def->name, sizeof(enum_def->name), name, NULL, 0);
+      (void)copy_string(enum_def->package_name, sizeof(enum_def->package_name), package_name, NULL, 0);
+      (void)copy_string(enum_def->scope, sizeof(enum_def->scope), scope, NULL, 0);
+      if (package_name[0] != '\0') {
+        (void)snprintf(enum_def->full_name, sizeof(enum_def->full_name), "%s.%s", package_name, qualified);
+      } else {
+        (void)copy_string(enum_def->full_name, sizeof(enum_def->full_name), qualified, NULL, 0);
+      }
+      enum_def->comment = comment;
+      holons_add_simple_type(index, enum_def->name, enum_def->full_name, err, err_len);
+      holons_add_simple_type(index, qualified, enum_def->full_name, err, err_len);
+      if (stack_count < sizeof(stack) / sizeof(stack[0])) {
+        (void)memset(&stack[stack_count], 0, sizeof(stack[stack_count]));
+        stack[stack_count].kind = HOLONS_BLOCK_ENUM;
+        stack[stack_count].index = index->enum_count;
+        (void)copy_string(stack[stack_count].name, sizeof(stack[stack_count].name), name, NULL, 0);
+        stack_count += 1;
+      }
+      index->enum_count += 1;
+      holons_clear_pending_comments(pending_comments, &pending_count);
+      goto holons_trim_closed_blocks;
+    }
+    {
+      char input_type[HOLONS_MAX_FIELD_LEN];
+      char output_type[HOLONS_MAX_FIELD_LEN];
+      int client_streaming;
+      int server_streaming;
+      if (holons_parse_rpc_line(value,
+                                name,
+                                sizeof(name),
+                                input_type,
+                                sizeof(input_type),
+                                &client_streaming,
+                                output_type,
+                                sizeof(output_type),
+                                &server_streaming)) {
+        ssize_t i;
+        holons_service_def_t *service = NULL;
+        for (i = (ssize_t)stack_count - 1; i >= 0; --i) {
+          if (stack[i].kind == HOLONS_BLOCK_SERVICE) {
+            service = &index->services[stack[i].index];
+            break;
+          }
+        }
+        if (service != NULL) {
+          holons_method_def_t *method;
+          if (holons_ensure_capacity((void **)&service->methods,
+                                     &service->method_capacity,
+                                     service->method_count,
+                                     sizeof(*service->methods),
+                                     err,
+                                     err_len) != 0) {
+            (void)fclose(f);
+            return -1;
+          }
+          method = &service->methods[service->method_count];
+          (void)memset(method, 0, sizeof(*method));
+          holons_comment_meta_from_lines(pending_comments, pending_count, &comment);
+          (void)copy_string(method->name, sizeof(method->name), name, NULL, 0);
+          holons_resolve_type(input_type, package_name, "", index,
+                              method->input_type, sizeof(method->input_type));
+          holons_resolve_type(output_type, package_name, "", index,
+                              method->output_type, sizeof(method->output_type));
+          method->client_streaming = client_streaming;
+          method->server_streaming = server_streaming;
+          method->comment = comment;
+          service->method_count += 1;
+        }
+        holons_clear_pending_comments(pending_comments, &pending_count);
+        goto holons_trim_closed_blocks;
+      }
+    }
+    {
+      char key_type[HOLONS_MAX_FIELD_LEN];
+      char value_type[HOLONS_MAX_FIELD_LEN];
+      int number;
+      if (holons_parse_map_field_line(value,
+                                      key_type,
+                                      sizeof(key_type),
+                                      value_type,
+                                      sizeof(value_type),
+                                      name,
+                                      sizeof(name),
+                                      &number)) {
+        ssize_t i;
+        holons_message_def_t *message = NULL;
+        for (i = (ssize_t)stack_count - 1; i >= 0; --i) {
+          if (stack[i].kind == HOLONS_BLOCK_MESSAGE) {
+            message = &index->messages[stack[i].index];
+            break;
+          }
+        }
+        if (message != NULL) {
+          holons_field_def_t *field;
+          if (holons_ensure_capacity((void **)&message->fields,
+                                     &message->field_capacity,
+                                     message->field_count,
+                                     sizeof(*message->fields),
+                                     err,
+                                     err_len) != 0) {
+            (void)fclose(f);
+            return -1;
+          }
+          field = &message->fields[message->field_count];
+          (void)memset(field, 0, sizeof(*field));
+          holons_comment_meta_from_lines(pending_comments, pending_count, &comment);
+          (void)copy_string(field->name, sizeof(field->name), name, NULL, 0);
+          (void)snprintf(field->type_name, sizeof(field->type_name), "map<%s,%s>", key_type, value_type);
+          (void)copy_string(field->raw_type, sizeof(field->raw_type), "map", NULL, 0);
+          field->number = number;
+          field->comment = comment;
+          field->cardinality = HOLONS_CARDINALITY_MAP;
+          (void)copy_string(field->package_name, sizeof(field->package_name), package_name, NULL, 0);
+          (void)copy_string(field->scope, sizeof(field->scope), message->scope, NULL, 0);
+          if (field->scope[0] != '\0') {
+            strncat(field->scope, ".", sizeof(field->scope) - strlen(field->scope) - 1);
+          }
+          strncat(field->scope, message->name, sizeof(field->scope) - strlen(field->scope) - 1);
+          (void)copy_string(field->map_key_type, sizeof(field->map_key_type), key_type, NULL, 0);
+          (void)copy_string(field->map_value_type, sizeof(field->map_value_type), value_type, NULL, 0);
+          message->field_count += 1;
+        }
+        holons_clear_pending_comments(pending_comments, &pending_count);
+        goto holons_trim_closed_blocks;
+      }
+    }
+    {
+      char type_name[HOLONS_MAX_FIELD_LEN];
+      holons_cardinality_t cardinality;
+      int number;
+      if (holons_parse_field_line(value,
+                                  type_name,
+                                  sizeof(type_name),
+                                  name,
+                                  sizeof(name),
+                                  &number,
+                                  &cardinality)) {
+        ssize_t i;
+        holons_message_def_t *message = NULL;
+        for (i = (ssize_t)stack_count - 1; i >= 0; --i) {
+          if (stack[i].kind == HOLONS_BLOCK_MESSAGE) {
+            message = &index->messages[stack[i].index];
+            break;
+          }
+        }
+        if (message != NULL) {
+          holons_field_def_t *field;
+          if (holons_ensure_capacity((void **)&message->fields,
+                                     &message->field_capacity,
+                                     message->field_count,
+                                     sizeof(*message->fields),
+                                     err,
+                                     err_len) != 0) {
+            (void)fclose(f);
+            return -1;
+          }
+          field = &message->fields[message->field_count];
+          (void)memset(field, 0, sizeof(*field));
+          holons_comment_meta_from_lines(pending_comments, pending_count, &comment);
+          (void)copy_string(field->name, sizeof(field->name), name, NULL, 0);
+          holons_resolve_type(type_name,
+                              package_name,
+                              message->scope[0] != '\0' ? message->scope : message->name,
+                              index,
+                              field->type_name,
+                              sizeof(field->type_name));
+          (void)copy_string(field->raw_type, sizeof(field->raw_type), type_name, NULL, 0);
+          field->number = number;
+          field->comment = comment;
+          field->cardinality = cardinality;
+          (void)copy_string(field->package_name, sizeof(field->package_name), package_name, NULL, 0);
+          (void)copy_string(field->scope, sizeof(field->scope), message->scope, NULL, 0);
+          if (field->scope[0] != '\0') {
+            strncat(field->scope, ".", sizeof(field->scope) - strlen(field->scope) - 1);
+          }
+          strncat(field->scope, message->name, sizeof(field->scope) - strlen(field->scope) - 1);
+          message->field_count += 1;
+        }
+        holons_clear_pending_comments(pending_comments, &pending_count);
+        goto holons_trim_closed_blocks;
+      }
+    }
+    {
+      char value_name[HOLONS_MAX_FIELD_LEN];
+      int number;
+      if (holons_parse_enum_value_line(value, value_name, sizeof(value_name), &number)) {
+        ssize_t i;
+        holons_enum_def_t *enum_def = NULL;
+        for (i = (ssize_t)stack_count - 1; i >= 0; --i) {
+          if (stack[i].kind == HOLONS_BLOCK_ENUM) {
+            enum_def = &index->enums[stack[i].index];
+            break;
+          }
+        }
+        if (enum_def != NULL) {
+          holons_enum_value_def_t *enum_value;
+          if (holons_ensure_capacity((void **)&enum_def->values,
+                                     &enum_def->value_capacity,
+                                     enum_def->value_count,
+                                     sizeof(*enum_def->values),
+                                     err,
+                                     err_len) != 0) {
+            (void)fclose(f);
+            return -1;
+          }
+          enum_value = &enum_def->values[enum_def->value_count];
+          (void)memset(enum_value, 0, sizeof(*enum_value));
+          holons_comment_meta_from_lines(pending_comments, pending_count, &comment);
+          (void)copy_string(enum_value->name, sizeof(enum_value->name), value_name, NULL, 0);
+          enum_value->number = number;
+          enum_value->comment = comment;
+          enum_def->value_count += 1;
+        }
+        holons_clear_pending_comments(pending_comments, &pending_count);
+        goto holons_trim_closed_blocks;
+      }
+    }
+
+    if (strcmp(value, "}") != 0) {
+      holons_clear_pending_comments(pending_comments, &pending_count);
+    }
+    goto holons_trim_closed_blocks;
+  }
+
+  (void)fclose(f);
+  return 0;
+}
+
+static int holons_parse_proto_directory(const char *proto_dir,
+                                        holons_proto_index_t *index,
+                                        char *err,
+                                        size_t err_len) {
+  DIR *dir;
+  struct dirent *entry;
+
+  dir = opendir(proto_dir);
+  if (dir == NULL) {
+    if (errno == ENOENT) {
+      return 0;
+    }
+    set_err(err, err_len, "cannot open proto directory %s: %s", proto_dir, strerror(errno));
+    return -1;
+  }
+
+  while ((entry = readdir(dir)) != NULL) {
+    char child[PATH_MAX];
+    struct stat st;
+    size_t len = strlen(entry->d_name);
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (snprintf(child, sizeof(child), "%s/%s", proto_dir, entry->d_name) >= (int)sizeof(child)) {
+      (void)closedir(dir);
+      set_err(err, err_len, "proto path is too long");
+      return -1;
+    }
+    if (stat(child, &st) != 0) {
+      continue;
+    }
+    if (S_ISDIR(st.st_mode)) {
+      if (holons_parse_proto_directory(child, index, err, err_len) != 0) {
+        (void)closedir(dir);
+        return -1;
+      }
+      continue;
+    }
+    if (len > 6 && strcmp(entry->d_name + len - 6, ".proto") == 0) {
+      if (holons_parse_proto_file(child, index, err, err_len) != 0) {
+        (void)closedir(dir);
+        return -1;
+      }
+    }
+  }
+
+  (void)closedir(dir);
+  return 0;
+}
+
+static int holons_build_field_doc(const holons_field_def_t *field,
+                                  const holons_proto_index_t *index,
+                                  const ssize_t *seen_messages,
+                                  size_t seen_count,
+                                  holons_field_doc_t *out,
+                                  char *err,
+                                  size_t err_len);
+
+static int holons_seen_contains(const ssize_t *seen_messages,
+                                size_t seen_count,
+                                ssize_t message_index) {
+  size_t i;
+  for (i = 0; i < seen_count; ++i) {
+    if (seen_messages[i] == message_index) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int holons_build_field_docs_from_message(ssize_t message_index,
+                                                const holons_proto_index_t *index,
+                                                const ssize_t *seen_messages,
+                                                size_t seen_count,
+                                                holons_field_doc_t **out_fields,
+                                                size_t *out_count,
+                                                char *err,
+                                                size_t err_len) {
+  const holons_message_def_t *message;
+  size_t i;
+  ssize_t next_seen[32];
+
+  if (message_index < 0 || (size_t)message_index >= index->message_count) {
+    *out_fields = NULL;
+    *out_count = 0;
+    return 0;
+  }
+  if (holons_seen_contains(seen_messages, seen_count, message_index)) {
+    *out_fields = NULL;
+    *out_count = 0;
+    return 0;
+  }
+
+  message = &index->messages[message_index];
+  if (message->field_count == 0) {
+    *out_fields = NULL;
+    *out_count = 0;
+    return 0;
+  }
+  if (seen_count >= sizeof(next_seen) / sizeof(next_seen[0])) {
+    *out_fields = NULL;
+    *out_count = 0;
+    return 0;
+  }
+  memcpy(next_seen, seen_messages, seen_count * sizeof(next_seen[0]));
+  next_seen[seen_count++] = message_index;
+
+  *out_fields = calloc(message->field_count, sizeof(**out_fields));
+  if (*out_fields == NULL) {
+    set_err(err, err_len, "out of memory");
+    return -1;
+  }
+  *out_count = message->field_count;
+  for (i = 0; i < message->field_count; ++i) {
+    if (holons_build_field_doc(&message->fields[i],
+                               index,
+                               next_seen,
+                               seen_count,
+                               &(*out_fields)[i],
+                               err,
+                               err_len) != 0) {
+      holons_free_field_docs(*out_fields, i);
+      *out_fields = NULL;
+      *out_count = 0;
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int holons_build_field_doc(const holons_field_def_t *field,
+                                  const holons_proto_index_t *index,
+                                  const ssize_t *seen_messages,
+                                  size_t seen_count,
+                                  holons_field_doc_t *out,
+                                  char *err,
+                                  size_t err_len) {
+  char resolved_type[HOLONS_MAX_FIELD_LEN];
+  ssize_t message_index;
+  ssize_t enum_index;
+  size_t i;
+
+  (void)memset(out, 0, sizeof(*out));
+  (void)copy_string(out->name, sizeof(out->name), field->name, NULL, 0);
+  (void)copy_string(out->type, sizeof(out->type), field->type_name, NULL, 0);
+  out->number = field->number;
+  (void)copy_string(out->description, sizeof(out->description), field->comment.description, NULL, 0);
+  (void)copy_string(out->map_key_type, sizeof(out->map_key_type), field->map_key_type, NULL, 0);
+  (void)copy_string(out->map_value_type, sizeof(out->map_value_type), field->map_value_type, NULL, 0);
+  (void)copy_string(out->example, sizeof(out->example), field->comment.example, NULL, 0);
+  out->required = field->comment.required;
+  if (field->cardinality == HOLONS_CARDINALITY_MAP) {
+    out->label = HOLONS_FIELD_LABEL_MAP;
+    holons_resolve_type(field->map_value_type, field->package_name, field->scope,
+                        index, resolved_type, sizeof(resolved_type));
+  } else if (field->cardinality == HOLONS_CARDINALITY_REPEATED) {
+    out->label = HOLONS_FIELD_LABEL_REPEATED;
+    holons_resolve_type(field->raw_type, field->package_name, field->scope,
+                        index, resolved_type, sizeof(resolved_type));
+  } else if (field->comment.required) {
+    out->label = HOLONS_FIELD_LABEL_REQUIRED;
+    holons_resolve_type(field->raw_type, field->package_name, field->scope,
+                        index, resolved_type, sizeof(resolved_type));
+  } else {
+    out->label = HOLONS_FIELD_LABEL_OPTIONAL;
+    holons_resolve_type(field->raw_type, field->package_name, field->scope,
+                        index, resolved_type, sizeof(resolved_type));
+  }
+
+  message_index = holons_find_message_index(index, resolved_type);
+  if (holons_build_field_docs_from_message(message_index,
+                                           index,
+                                           seen_messages,
+                                           seen_count,
+                                           &out->nested_fields,
+                                           &out->nested_field_count,
+                                           err,
+                                           err_len) != 0) {
+    return -1;
+  }
+
+  enum_index = holons_find_enum_index(index, resolved_type);
+  if (enum_index >= 0) {
+    const holons_enum_def_t *enum_def = &index->enums[enum_index];
+    out->enum_values = calloc(enum_def->value_count, sizeof(*out->enum_values));
+    if (enum_def->value_count > 0 && out->enum_values == NULL) {
+      holons_free_field_docs(out->nested_fields, out->nested_field_count);
+      out->nested_fields = NULL;
+      out->nested_field_count = 0;
+      set_err(err, err_len, "out of memory");
+      return -1;
+    }
+    out->enum_value_count = enum_def->value_count;
+    for (i = 0; i < enum_def->value_count; ++i) {
+      (void)copy_string(out->enum_values[i].name,
+                        sizeof(out->enum_values[i].name),
+                        enum_def->values[i].name,
+                        NULL,
+                        0);
+      out->enum_values[i].number = enum_def->values[i].number;
+      (void)copy_string(out->enum_values[i].description,
+                        sizeof(out->enum_values[i].description),
+                        enum_def->values[i].comment.description,
+                        NULL,
+                        0);
+    }
+  }
+  return 0;
+}
+
+static int holons_build_method_doc(const holons_method_def_t *method,
+                                   const holons_proto_index_t *index,
+                                   holons_method_doc_t *out,
+                                   char *err,
+                                   size_t err_len) {
+  ssize_t input_index;
+  ssize_t output_index;
+
+  (void)memset(out, 0, sizeof(*out));
+  (void)copy_string(out->name, sizeof(out->name), method->name, NULL, 0);
+  (void)copy_string(out->description, sizeof(out->description), method->comment.description, NULL, 0);
+  (void)copy_string(out->input_type, sizeof(out->input_type), method->input_type, NULL, 0);
+  (void)copy_string(out->output_type, sizeof(out->output_type), method->output_type, NULL, 0);
+  (void)copy_string(out->example_input, sizeof(out->example_input), method->comment.example, NULL, 0);
+  out->client_streaming = method->client_streaming;
+  out->server_streaming = method->server_streaming;
+
+  input_index = holons_find_message_index(index, method->input_type);
+  if (holons_build_field_docs_from_message(input_index,
+                                           index,
+                                           NULL,
+                                           0,
+                                           &out->input_fields,
+                                           &out->input_field_count,
+                                           err,
+                                           err_len) != 0) {
+    return -1;
+  }
+
+  output_index = holons_find_message_index(index, method->output_type);
+  if (holons_build_field_docs_from_message(output_index,
+                                           index,
+                                           NULL,
+                                           0,
+                                           &out->output_fields,
+                                           &out->output_field_count,
+                                           err,
+                                           err_len) != 0) {
+    holons_free_field_docs(out->input_fields, out->input_field_count);
+    out->input_fields = NULL;
+    out->input_field_count = 0;
+    return -1;
+  }
+  return 0;
+}
+
+static int holons_build_service_doc(const holons_service_def_t *service,
+                                    const holons_proto_index_t *index,
+                                    holons_service_doc_t *out,
+                                    char *err,
+                                    size_t err_len) {
+  size_t i;
+  (void)memset(out, 0, sizeof(*out));
+  (void)copy_string(out->name, sizeof(out->name), service->full_name, NULL, 0);
+  (void)copy_string(out->description, sizeof(out->description), service->comment.description, NULL, 0);
+  if (service->method_count == 0) {
+    return 0;
+  }
+  out->methods = calloc(service->method_count, sizeof(*out->methods));
+  if (out->methods == NULL) {
+    set_err(err, err_len, "out of memory");
+    return -1;
+  }
+  out->method_count = service->method_count;
+  for (i = 0; i < service->method_count; ++i) {
+    if (holons_build_method_doc(&service->methods[i], index, &out->methods[i], err, err_len) != 0) {
+      size_t j;
+      for (j = 0; j < i; ++j) {
+        holons_free_field_docs(out->methods[j].input_fields, out->methods[j].input_field_count);
+        holons_free_field_docs(out->methods[j].output_fields, out->methods[j].output_field_count);
+      }
+      free(out->methods);
+      out->methods = NULL;
+      out->method_count = 0;
+      return -1;
+    }
+  }
+  return 0;
+}
+
+int holons_build_describe_response(const char *proto_dir,
+                                   const char *holon_yaml_path,
+                                   holons_describe_response_t *out,
+                                   char *err,
+                                   size_t err_len) {
+  holons_identity_t identity;
+  holons_proto_index_t index;
+  size_t visible_services = 0;
+  size_t i;
+  size_t out_index = 0;
+
+  if (out == NULL || holon_yaml_path == NULL) {
+    set_err(err, err_len, "response output and holon yaml path are required");
+    return -1;
+  }
+
+  holons_init_describe_response(out);
+  (void)memset(&identity, 0, sizeof(identity));
+  (void)memset(&index, 0, sizeof(index));
+
+  if (holons_parse_holon(holon_yaml_path, &identity, err, err_len) != 0) {
+    return -1;
+  }
+  slug_for_identity(&identity, out->slug, sizeof(out->slug));
+  (void)copy_string(out->motto, sizeof(out->motto), identity.motto, NULL, 0);
+
+  if (proto_dir == NULL || proto_dir[0] == '\0') {
+    return 0;
+  }
+  if (holons_parse_proto_directory(proto_dir, &index, err, err_len) != 0) {
+    holons_free_proto_index(&index);
+    return -1;
+  }
+
+  for (i = 0; i < index.service_count; ++i) {
+    if (strcmp(index.services[i].full_name, HOLONS_META_SERVICE_NAME) != 0) {
+      visible_services += 1;
+    }
+  }
+  if (visible_services == 0) {
+    holons_free_proto_index(&index);
+    return 0;
+  }
+
+  out->services = calloc(visible_services, sizeof(*out->services));
+  if (out->services == NULL) {
+    holons_free_proto_index(&index);
+    set_err(err, err_len, "out of memory");
+    return -1;
+  }
+  out->service_count = visible_services;
+  for (i = 0; i < index.service_count; ++i) {
+    if (strcmp(index.services[i].full_name, HOLONS_META_SERVICE_NAME) == 0) {
+      continue;
+    }
+    if (holons_build_service_doc(&index.services[i],
+                                 &index,
+                                 &out->services[out_index],
+                                 err,
+                                 err_len) != 0) {
+      holons_free_describe_response(out);
+      holons_free_proto_index(&index);
+      return -1;
+    }
+    out_index += 1;
+  }
+
+  holons_free_proto_index(&index);
+  return 0;
+}
+
+int holons_make_holonmeta_registration(const char *proto_dir,
+                                       const char *holon_yaml_path,
+                                       holons_holonmeta_registration_t *out,
+                                       char *err,
+                                       size_t err_len) {
+  if (out == NULL || holon_yaml_path == NULL) {
+    set_err(err, err_len, "registration output and holon yaml path are required");
+    return -1;
+  }
+  (void)memset(out, 0, sizeof(*out));
+  (void)copy_string(out->service_name, sizeof(out->service_name),
+                    HOLONS_META_SERVICE_NAME, err, err_len);
+  (void)copy_string(out->method_name, sizeof(out->method_name),
+                    "Describe", err, err_len);
+  if (proto_dir != NULL) {
+    (void)copy_string(out->proto_dir, sizeof(out->proto_dir), proto_dir, err, err_len);
+  }
+  (void)copy_string(out->holon_yaml_path, sizeof(out->holon_yaml_path),
+                    holon_yaml_path, err, err_len);
+  return 0;
+}
+
+int holons_invoke_holonmeta_describe(const holons_holonmeta_registration_t *registration,
+                                     const holons_describe_request_t *request,
+                                     holons_describe_response_t *out,
+                                     char *err,
+                                     size_t err_len) {
+  (void)request;
+  if (registration == NULL) {
+    set_err(err, err_len, "registration is required");
+    return -1;
+  }
+  return holons_build_describe_response(registration->proto_dir,
+                                        registration->holon_yaml_path,
+                                        out,
+                                        err,
+                                        err_len);
+}

@@ -12,6 +12,7 @@ extern "C" {
 #define HOLONS_DEFAULT_URI "tcp://:9090"
 #define HOLONS_MAX_URI_LEN 512
 #define HOLONS_MAX_FIELD_LEN 256
+#define HOLONS_MAX_DOC_LEN 512
 
 typedef enum {
   HOLONS_SCHEME_INVALID = 0,
@@ -97,6 +98,75 @@ typedef struct {
   const char *port_file;
 } holons_connect_options;
 
+typedef enum {
+  HOLONS_FIELD_LABEL_UNSPECIFIED = 0,
+  HOLONS_FIELD_LABEL_OPTIONAL = 1,
+  HOLONS_FIELD_LABEL_REPEATED = 2,
+  HOLONS_FIELD_LABEL_MAP = 3,
+  HOLONS_FIELD_LABEL_REQUIRED = 4
+} holons_field_label_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  int number;
+  char description[HOLONS_MAX_DOC_LEN];
+} holons_enum_value_doc_t;
+
+typedef struct holons_field_doc {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char type[HOLONS_MAX_FIELD_LEN];
+  int number;
+  char description[HOLONS_MAX_DOC_LEN];
+  holons_field_label_t label;
+  char map_key_type[HOLONS_MAX_FIELD_LEN];
+  char map_value_type[HOLONS_MAX_FIELD_LEN];
+  struct holons_field_doc *nested_fields;
+  size_t nested_field_count;
+  holons_enum_value_doc_t *enum_values;
+  size_t enum_value_count;
+  int required;
+  char example[HOLONS_MAX_DOC_LEN];
+} holons_field_doc_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char description[HOLONS_MAX_DOC_LEN];
+  char input_type[HOLONS_MAX_FIELD_LEN];
+  char output_type[HOLONS_MAX_FIELD_LEN];
+  holons_field_doc_t *input_fields;
+  size_t input_field_count;
+  holons_field_doc_t *output_fields;
+  size_t output_field_count;
+  int client_streaming;
+  int server_streaming;
+  char example_input[HOLONS_MAX_DOC_LEN];
+} holons_method_doc_t;
+
+typedef struct {
+  char name[HOLONS_MAX_FIELD_LEN];
+  char description[HOLONS_MAX_DOC_LEN];
+  holons_method_doc_t *methods;
+  size_t method_count;
+} holons_service_doc_t;
+
+typedef struct {
+  char slug[HOLONS_MAX_FIELD_LEN];
+  char motto[HOLONS_MAX_DOC_LEN];
+  holons_service_doc_t *services;
+  size_t service_count;
+} holons_describe_response_t;
+
+typedef struct {
+  int reserved;
+} holons_describe_request_t;
+
+typedef struct {
+  char service_name[HOLONS_MAX_FIELD_LEN];
+  char method_name[HOLONS_MAX_FIELD_LEN];
+  char proto_dir[HOLONS_MAX_URI_LEN];
+  char holon_yaml_path[HOLONS_MAX_URI_LEN];
+} holons_holonmeta_registration_t;
+
 const char *holons_default_uri(void);
 holons_scheme_t holons_scheme_from_uri(const char *uri);
 const char *holons_scheme_name(holons_scheme_t scheme);
@@ -128,6 +198,22 @@ int holons_serve(const char *listen_uri,
                  size_t err_len);
 
 int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size_t err_len);
+int holons_build_describe_response(const char *proto_dir,
+                                   const char *holon_yaml_path,
+                                   holons_describe_response_t *out,
+                                   char *err,
+                                   size_t err_len);
+int holons_make_holonmeta_registration(const char *proto_dir,
+                                       const char *holon_yaml_path,
+                                       holons_holonmeta_registration_t *out,
+                                       char *err,
+                                       size_t err_len);
+int holons_invoke_holonmeta_describe(const holons_holonmeta_registration_t *registration,
+                                     const holons_describe_request_t *request,
+                                     holons_describe_response_t *out,
+                                     char *err,
+                                     size_t err_len);
+void holons_free_describe_response(holons_describe_response_t *response);
 int holons_discover(const char *root,
                     holon_entry_t **entries,
                     size_t *count,
