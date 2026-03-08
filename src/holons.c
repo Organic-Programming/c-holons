@@ -8,18 +8,41 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <netdb.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t g_stop_requested = 0;
+
+#define HOLONS_CONNECT_DEFAULT_TIMEOUT_MS 5000
+#define HOLONS_CONNECT_STOP_TIMEOUT_MS 2000
+#define HOLONS_CONNECT_POLL_MS 50
+
+struct grpc_channel {
+  char target[HOLONS_MAX_URI_LEN];
+};
+
+typedef struct holons_started_channel {
+  grpc_channel *channel;
+  pid_t pid;
+  int ephemeral;
+  int output_fd;
+  struct holons_started_channel *next;
+} holons_started_channel_t;
+
+static holons_started_channel_t *g_started_channels = NULL;
 
 static void set_err(char *err, size_t err_len, const char *fmt, ...) {
   va_list ap;
@@ -1552,6 +1575,1011 @@ holon_entry_t *holons_find_by_uuid(const char *prefix, char *err, size_t err_len
     free(entries);
     return result;
   }
+}
+
+static long long monotonic_millis(void) {
+  struct timespec ts;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0;
+  }
+  return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
+}
+
+static void sleep_millis(int millis) {
+  struct timespec req;
+
+  if (millis <= 0) {
+    return;
+  }
+
+  req.tv_sec = millis / 1000;
+  req.tv_nsec = (long)(millis % 1000) * 1000000L;
+  while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+  }
+}
+
+static int path_is_dir(const char *path) {
+  struct stat st;
+
+  if (path == NULL || stat(path, &st) != 0) {
+    return 0;
+  }
+  return S_ISDIR(st.st_mode);
+}
+
+static const char *path_basename(const char *path) {
+  const char *slash;
+
+  if (path == NULL) {
+    return "";
+  }
+
+  slash = strrchr(path, '/');
+  if (slash == NULL) {
+    return path;
+  }
+  return slash + 1;
+}
+
+static int is_blank_string(const char *text) {
+  if (text == NULL) {
+    return 1;
+  }
+  while (*text != '\0') {
+    if (!isspace((unsigned char)*text)) {
+      return 0;
+    }
+    ++text;
+  }
+  return 1;
+}
+
+static int ensure_dir_recursive(const char *path, mode_t mode, char *err, size_t err_len) {
+  char tmp[PATH_MAX];
+  char *p;
+
+  if (path == NULL || path[0] == '\0') {
+    return 0;
+  }
+
+  if (copy_string(tmp, sizeof(tmp), path, err, err_len) != 0) {
+    return -1;
+  }
+
+  for (p = tmp + 1; *p != '\0'; ++p) {
+    if (*p != '/') {
+      continue;
+    }
+    *p = '\0';
+    if (tmp[0] != '\0') {
+      if (mkdir(tmp, mode) != 0) {
+        if (errno != EEXIST) {
+          set_err(err, err_len, "mkdir(%s) failed: %s", tmp, strerror(errno));
+          return -1;
+        }
+        if (!path_is_dir(tmp)) {
+          set_err(err, err_len, "%s exists and is not a directory", tmp);
+          return -1;
+        }
+      }
+    }
+    *p = '/';
+  }
+
+  if (mkdir(tmp, mode) != 0) {
+    if (errno != EEXIST) {
+      set_err(err, err_len, "mkdir(%s) failed: %s", tmp, strerror(errno));
+      return -1;
+    }
+    if (!path_is_dir(tmp)) {
+      set_err(err, err_len, "%s exists and is not a directory", tmp);
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int ensure_parent_dir(const char *path, mode_t mode, char *err, size_t err_len) {
+  char parent[PATH_MAX];
+  char *slash;
+
+  if (path == NULL || path[0] == '\0') {
+    return 0;
+  }
+
+  if (copy_string(parent, sizeof(parent), path, err, err_len) != 0) {
+    return -1;
+  }
+
+  slash = strrchr(parent, '/');
+  if (slash == NULL) {
+    return 0;
+  }
+  if (slash == parent) {
+    slash[1] = '\0';
+  } else {
+    *slash = '\0';
+  }
+  return ensure_dir_recursive(parent, mode, err, err_len);
+}
+
+static int write_port_file(const char *path, const char *uri, char *err, size_t err_len) {
+  char trimmed_uri[HOLONS_MAX_URI_LEN];
+  char *value;
+  FILE *f;
+
+  if (path == NULL || uri == NULL) {
+    set_err(err, err_len, "port file path and URI are required");
+    return -1;
+  }
+
+  if (ensure_parent_dir(path, 0755, err, err_len) != 0) {
+    return -1;
+  }
+  if (copy_string(trimmed_uri, sizeof(trimmed_uri), uri, err, err_len) != 0) {
+    return -1;
+  }
+
+  value = trim(trimmed_uri);
+  f = fopen(path, "w");
+  if (f == NULL) {
+    set_err(err, err_len, "cannot open %s: %s", path, strerror(errno));
+    return -1;
+  }
+
+  if (fprintf(f, "%s\n", value) < 0 || fclose(f) != 0) {
+    set_err(err, err_len, "cannot write %s: %s", path, strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+static int default_port_file_path(const char *slug, char *out, size_t out_len, char *err, size_t err_len) {
+  char cwd[PATH_MAX];
+
+  if (slug == NULL || slug[0] == '\0') {
+    set_err(err, err_len, "slug is required");
+    return -1;
+  }
+  if (getcwd(cwd, sizeof(cwd)) == NULL) {
+    set_err(err, err_len, "getcwd failed: %s", strerror(errno));
+    return -1;
+  }
+  if (snprintf(out, out_len, "%s/.op/run/%s.port", cwd, slug) >= (int)out_len) {
+    set_err(err, err_len, "port file path is too long");
+    return -1;
+  }
+  return 0;
+}
+
+static int is_direct_target(const char *target) {
+  if (target == NULL) {
+    return 0;
+  }
+  return strstr(target, "://") != NULL || strchr(target, ':') != NULL;
+}
+
+static int normalize_dial_target(const char *target,
+                                 char *out,
+                                 size_t out_len,
+                                 char *err,
+                                 size_t err_len) {
+  holons_uri_t uri;
+  const char *host;
+
+  if (target == NULL || target[0] == '\0') {
+    set_err(err, err_len, "target is required");
+    return -1;
+  }
+
+  if (strstr(target, "://") == NULL) {
+    return copy_string(out, out_len, target, err, err_len);
+  }
+
+  if (strncmp(target, "unix://", 7) == 0) {
+    return copy_string(out, out_len, target, err, err_len);
+  }
+
+  if (holons_parse_uri(target, &uri, err, err_len) != 0) {
+    return -1;
+  }
+  if (uri.scheme != HOLONS_SCHEME_TCP) {
+    return copy_string(out, out_len, target, err, err_len);
+  }
+
+  host = uri.host;
+  if (host[0] == '\0' || strcmp(host, "0.0.0.0") == 0 || strcmp(host, "::") == 0) {
+    host = "127.0.0.1";
+  }
+
+  if (strchr(host, ':') != NULL) {
+    if (snprintf(out, out_len, "[%s]:%d", host, uri.port) >= (int)out_len) {
+      set_err(err, err_len, "normalized dial target is too long");
+      return -1;
+    }
+    return 0;
+  }
+
+  if (snprintf(out, out_len, "%s:%d", host, uri.port) >= (int)out_len) {
+    set_err(err, err_len, "normalized dial target is too long");
+    return -1;
+  }
+  return 0;
+}
+
+static int probe_unix_target(const char *path, char *err, size_t err_len) {
+  struct sockaddr_un addr;
+  int fd;
+
+  if (path == NULL || path[0] == '\0') {
+    set_err(err, err_len, "unix path is empty");
+    return -1;
+  }
+  if (strlen(path) >= sizeof(addr.sun_path)) {
+    set_err(err, err_len, "unix path is too long");
+    return -1;
+  }
+
+  fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    set_err(err, err_len, "socket(AF_UNIX) failed: %s", strerror(errno));
+    return -1;
+  }
+
+  (void)memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  (void)strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    set_err(err, err_len, "connect(%s) failed: %s", path, strerror(errno));
+    (void)close(fd);
+    return -1;
+  }
+
+  (void)close(fd);
+  return 0;
+}
+
+static int probe_tcp_target(const char *host, int port, char *err, size_t err_len) {
+  int fd = -1;
+
+  if (connect_tcp_socket(host, port, &fd, err, err_len) != 0) {
+    return -1;
+  }
+
+  if (fd >= 0) {
+    (void)close(fd);
+  }
+  return 0;
+}
+
+static int wait_for_ready_target(const char *target, int timeout_ms, char *err, size_t err_len) {
+  long long deadline;
+  char probe_err[256] = "";
+
+  if (target == NULL || target[0] == '\0') {
+    set_err(err, err_len, "target is required");
+    return -1;
+  }
+
+  if (timeout_ms <= 0) {
+    timeout_ms = HOLONS_CONNECT_DEFAULT_TIMEOUT_MS;
+  }
+  deadline = monotonic_millis() + timeout_ms;
+
+  for (;;) {
+    if (strstr(target, "://") != NULL) {
+      holons_uri_t uri;
+
+      if (holons_parse_uri(target, &uri, probe_err, sizeof(probe_err)) != 0) {
+        set_err(err, err_len, "%s", probe_err);
+        return -1;
+      }
+
+      if (uri.scheme == HOLONS_SCHEME_TCP) {
+        if (probe_tcp_target(uri.host, uri.port, probe_err, sizeof(probe_err)) == 0) {
+          return 0;
+        }
+      } else if (uri.scheme == HOLONS_SCHEME_UNIX) {
+        if (probe_unix_target(uri.path, probe_err, sizeof(probe_err)) == 0) {
+          return 0;
+        }
+      } else {
+        set_err(err, err_len, "unsupported connect target: %s", target);
+        return -1;
+      }
+    } else {
+      char host[256];
+      int port;
+
+      if (parse_host_port(target, host, sizeof(host), &port, probe_err, sizeof(probe_err)) != 0) {
+        set_err(err, err_len, "%s", probe_err);
+        return -1;
+      }
+      if (probe_tcp_target(host, port, probe_err, sizeof(probe_err)) == 0) {
+        return 0;
+      }
+    }
+
+    if (monotonic_millis() >= deadline) {
+      break;
+    }
+    sleep_millis(HOLONS_CONNECT_POLL_MS);
+  }
+
+  if (probe_err[0] == '\0') {
+    set_err(err, err_len, "timed out waiting for connect target");
+  } else {
+    set_err(err, err_len, "timed out waiting for connect target: %s", probe_err);
+  }
+  return -1;
+}
+
+static int usable_port_file(const char *path,
+                            int timeout_ms,
+                            char *out_uri,
+                            size_t out_uri_len,
+                            char *err,
+                            size_t err_len) {
+  char buf[HOLONS_MAX_URI_LEN];
+  char *target;
+  FILE *f;
+  size_t n;
+  int probe_timeout;
+  char probe_err[256] = "";
+
+  if (path == NULL || path[0] == '\0' || out_uri == NULL || out_uri_len == 0) {
+    return 0;
+  }
+
+  f = fopen(path, "r");
+  if (f == NULL) {
+    return 0;
+  }
+
+  n = fread(buf, 1, sizeof(buf) - 1, f);
+  if (ferror(f)) {
+    (void)fclose(f);
+    return 0;
+  }
+  buf[n] = '\0';
+  (void)fclose(f);
+
+  target = trim(buf);
+  if (target[0] == '\0') {
+    (void)unlink(path);
+    return 0;
+  }
+
+  probe_timeout = timeout_ms / 4;
+  if (probe_timeout <= 0) {
+    probe_timeout = 1000;
+  }
+  if (probe_timeout > 1000) {
+    probe_timeout = 1000;
+  }
+
+  if (wait_for_ready_target(target, probe_timeout, probe_err, sizeof(probe_err)) == 0) {
+    return copy_string(out_uri, out_uri_len, target, err, err_len) == 0 ? 1 : 0;
+  }
+
+  (void)unlink(path);
+  return 0;
+}
+
+static int uri_prefix_at(const char *text) {
+  return strncmp(text, "tcp://", 6) == 0 || strncmp(text, "unix://", 7) == 0 ||
+         strncmp(text, "ws://", 5) == 0 || strncmp(text, "wss://", 6) == 0 ||
+         strncmp(text, "stdio://", 8) == 0;
+}
+
+static int first_uri_in_text(const char *text, char *out, size_t out_len) {
+  const char *trim_chars = "\"'()[]{}.,";
+  size_t i;
+
+  if (text == NULL || out == NULL || out_len == 0) {
+    return 0;
+  }
+
+  for (i = 0; text[i] != '\0'; ++i) {
+    size_t start = i;
+    size_t end = i;
+    size_t n;
+
+    if (!uri_prefix_at(text + i)) {
+      continue;
+    }
+
+    while (text[end] != '\0' && !isspace((unsigned char)text[end])) {
+      ++end;
+    }
+    while (end > start && strchr(trim_chars, text[end - 1]) != NULL) {
+      --end;
+    }
+
+    n = end - start;
+    if (n == 0 || n >= out_len) {
+      continue;
+    }
+
+    (void)memcpy(out, text + start, n);
+    out[n] = '\0';
+    return 1;
+  }
+
+  return 0;
+}
+
+static int read_advertised_uri(int fd,
+                               pid_t pid,
+                               int timeout_ms,
+                               char *out_uri,
+                               size_t out_uri_len,
+                               char *err,
+                               size_t err_len) {
+  char buf[4096];
+  size_t used = 0;
+  long long deadline;
+
+  if (fd < 0 || out_uri == NULL || out_uri_len == 0) {
+    set_err(err, err_len, "startup pipe is invalid");
+    return -1;
+  }
+
+  if (timeout_ms <= 0) {
+    timeout_ms = HOLONS_CONNECT_DEFAULT_TIMEOUT_MS;
+  }
+
+  buf[0] = '\0';
+  deadline = monotonic_millis() + timeout_ms;
+
+  for (;;) {
+    fd_set readfds;
+    struct timeval tv;
+    long long now = monotonic_millis();
+    long long remaining = deadline - now;
+    int select_ms;
+    int status;
+    int rc;
+
+    if (first_uri_in_text(buf, out_uri, out_uri_len)) {
+      return 0;
+    }
+
+    rc = (int)waitpid(pid, &status, WNOHANG);
+    if (rc == (int)pid) {
+      set_err(err, err_len, "holon exited before advertising an address");
+      return -1;
+    }
+    if (rc < 0 && errno != EINTR && errno != ECHILD) {
+      set_err(err, err_len, "waitpid(%ld) failed: %s", (long)pid, strerror(errno));
+      return -1;
+    }
+
+    if (remaining <= 0) {
+      break;
+    }
+
+    select_ms = (int)(remaining > HOLONS_CONNECT_POLL_MS ? HOLONS_CONNECT_POLL_MS : remaining);
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+    tv.tv_sec = select_ms / 1000;
+    tv.tv_usec = (select_ms % 1000) * 1000;
+
+    rc = select(fd + 1, &readfds, NULL, NULL, &tv);
+    if (rc < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      set_err(err, err_len, "select() failed: %s", strerror(errno));
+      return -1;
+    }
+    if (rc == 0) {
+      continue;
+    }
+
+    if (FD_ISSET(fd, &readfds)) {
+      ssize_t n = read(fd, buf + used, sizeof(buf) - 1 - used);
+
+      if (n < 0) {
+        if (errno == EINTR || errno == EAGAIN) {
+          continue;
+        }
+        set_err(err, err_len, "read() failed: %s", strerror(errno));
+        return -1;
+      }
+      if (n == 0) {
+        continue;
+      }
+
+      used += (size_t)n;
+      buf[used] = '\0';
+      if (first_uri_in_text(buf, out_uri, out_uri_len)) {
+        return 0;
+      }
+
+      if (used >= sizeof(buf) - 1) {
+        size_t keep = used > 1024 ? 1024 : used;
+        (void)memmove(buf, buf + used - keep, keep);
+        used = keep;
+        buf[used] = '\0';
+      }
+    }
+  }
+
+  set_err(err, err_len, "timed out waiting for holon startup");
+  return -1;
+}
+
+static int stop_started_process(pid_t pid) {
+  int status;
+  long long deadline;
+
+  if (pid <= 0) {
+    return 0;
+  }
+
+  if (kill(pid, SIGTERM) != 0 && errno != ESRCH) {
+    return -1;
+  }
+
+  deadline = monotonic_millis() + HOLONS_CONNECT_STOP_TIMEOUT_MS;
+  for (;;) {
+    pid_t waited = waitpid(pid, &status, WNOHANG);
+
+    if (waited == pid) {
+      return 0;
+    }
+    if (waited < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == ECHILD) {
+        return 0;
+      }
+      return -1;
+    }
+    if (monotonic_millis() >= deadline) {
+      break;
+    }
+    sleep_millis(25);
+  }
+
+  if (kill(pid, SIGKILL) != 0 && errno != ESRCH) {
+    return -1;
+  }
+
+  for (;;) {
+    pid_t waited = waitpid(pid, &status, 0);
+    if (waited == pid) {
+      return 0;
+    }
+    if (waited < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == ECHILD) {
+        return 0;
+      }
+      return -1;
+    }
+  }
+}
+
+static int start_tcp_holon(const char *binary_path,
+                           int timeout_ms,
+                           char *out_uri,
+                           size_t out_uri_len,
+                           pid_t *out_pid,
+                           int *out_fd,
+                           char *err,
+                           size_t err_len) {
+  int pipefd[2];
+  pid_t pid;
+
+  if (binary_path == NULL || binary_path[0] == '\0') {
+    set_err(err, err_len, "binary path is required");
+    return -1;
+  }
+
+  if (pipe(pipefd) != 0) {
+    set_err(err, err_len, "pipe() failed: %s", strerror(errno));
+    return -1;
+  }
+
+  pid = fork();
+  if (pid < 0) {
+    set_err(err, err_len, "fork() failed: %s", strerror(errno));
+    (void)close(pipefd[0]);
+    (void)close(pipefd[1]);
+    return -1;
+  }
+
+  if (pid == 0) {
+    (void)close(pipefd[0]);
+    if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) {
+      _exit(127);
+    }
+    if (pipefd[1] != STDOUT_FILENO && pipefd[1] != STDERR_FILENO) {
+      (void)close(pipefd[1]);
+    }
+    execl(binary_path, binary_path, "serve", "--listen", "tcp://127.0.0.1:0", (char *)NULL);
+    _exit(127);
+  }
+
+  (void)close(pipefd[1]);
+  if (read_advertised_uri(pipefd[0], pid, timeout_ms, out_uri, out_uri_len, err, err_len) != 0) {
+    (void)stop_started_process(pid);
+    (void)close(pipefd[0]);
+    return -1;
+  }
+
+  if (out_pid != NULL) {
+    *out_pid = pid;
+  }
+  if (out_fd != NULL) {
+    *out_fd = pipefd[0];
+  } else {
+    (void)close(pipefd[0]);
+  }
+
+  return 0;
+}
+
+static int resolve_binary_path(const holon_entry_t *entry,
+                               char *out,
+                               size_t out_len,
+                               char *err,
+                               size_t err_len) {
+  char binary_buf[HOLONS_MAX_FIELD_LEN];
+  char candidate[PATH_MAX];
+  const char *binary_name;
+  const char *base_name;
+  struct stat st;
+  char *path_copy = NULL;
+  char *dir;
+
+  if (entry == NULL) {
+    set_err(err, err_len, "holon entry is required");
+    return -1;
+  }
+  if (!entry->has_manifest) {
+    set_err(err, err_len, "holon \"%s\" has no manifest", entry->slug);
+    return -1;
+  }
+  if (copy_string(binary_buf, sizeof(binary_buf), entry->manifest.artifacts.binary, err, err_len) != 0) {
+    return -1;
+  }
+
+  binary_name = trim(binary_buf);
+  if (binary_name[0] == '\0') {
+    set_err(err, err_len, "holon \"%s\" has no artifacts.binary", entry->slug);
+    return -1;
+  }
+
+  if (binary_name[0] == '/' && access(binary_name, X_OK) == 0 && stat(binary_name, &st) == 0 &&
+      S_ISREG(st.st_mode)) {
+    return copy_string(out, out_len, binary_name, err, err_len);
+  }
+
+  base_name = path_basename(binary_name);
+  if (snprintf(candidate, sizeof(candidate), "%s/.op/build/bin/%s", entry->dir, base_name) <
+          (int)sizeof(candidate) &&
+      access(candidate, X_OK) == 0 && stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
+    return copy_string(out, out_len, candidate, err, err_len);
+  }
+
+  if (getenv("PATH") == NULL || getenv("PATH")[0] == '\0') {
+    set_err(err, err_len, "built binary not found for holon \"%s\"", entry->slug);
+    return -1;
+  }
+
+  path_copy = strdup(getenv("PATH"));
+  if (path_copy == NULL) {
+    set_err(err, err_len, "out of memory");
+    return -1;
+  }
+
+  dir = strtok(path_copy, ":");
+  while (dir != NULL) {
+    const char *lookup_dir = dir[0] == '\0' ? "." : dir;
+
+    if (snprintf(candidate, sizeof(candidate), "%s/%s", lookup_dir, base_name) < (int)sizeof(candidate) &&
+        access(candidate, X_OK) == 0 && stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
+      int rc = copy_string(out, out_len, candidate, err, err_len);
+      free(path_copy);
+      return rc;
+    }
+    dir = strtok(NULL, ":");
+  }
+
+  free(path_copy);
+  set_err(err, err_len, "built binary not found for holon \"%s\"", entry->slug);
+  return -1;
+}
+
+static int remember_started_channel(grpc_channel *channel, pid_t pid, int ephemeral, int output_fd) {
+  holons_started_channel_t *started = malloc(sizeof(*started));
+
+  if (started == NULL) {
+    return -1;
+  }
+
+  started->channel = channel;
+  started->pid = pid;
+  started->ephemeral = ephemeral;
+  started->output_fd = output_fd;
+  started->next = g_started_channels;
+  g_started_channels = started;
+  return 0;
+}
+
+static holons_started_channel_t *take_started_channel(grpc_channel *channel) {
+  holons_started_channel_t **current = &g_started_channels;
+
+  while (*current != NULL) {
+    if ((*current)->channel == channel) {
+      holons_started_channel_t *match = *current;
+      *current = match->next;
+      match->next = NULL;
+      return match;
+    }
+    current = &(*current)->next;
+  }
+
+  return NULL;
+}
+
+static grpc_channel *grpc_insecure_channel_create(const char *target, const void *args, void *reserved) {
+  grpc_channel *channel;
+
+  (void)args;
+  (void)reserved;
+
+  if (target == NULL || target[0] == '\0') {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  channel = calloc(1, sizeof(*channel));
+  if (channel == NULL) {
+    return NULL;
+  }
+  if (copy_string(channel->target, sizeof(channel->target), target, NULL, 0) != 0) {
+    free(channel);
+    errno = ENAMETOOLONG;
+    return NULL;
+  }
+  return channel;
+}
+
+static void grpc_channel_destroy(grpc_channel *channel) { free(channel); }
+
+static grpc_channel *connect_internal(const char *target, holons_connect_options opts, int ephemeral) {
+  char target_buf[HOLONS_MAX_URI_LEN];
+  char transport_buf[32];
+  char port_file_buf[PATH_MAX];
+  char port_path[PATH_MAX];
+  char dial_target[HOLONS_MAX_URI_LEN];
+  char started_uri[HOLONS_MAX_URI_LEN];
+  char binary_path[PATH_MAX];
+  char err[256] = "";
+  const char *transport;
+  const char *trimmed_target;
+  holon_entry_t *entry = NULL;
+  grpc_channel *channel = NULL;
+  pid_t pid = -1;
+  int output_fd = -1;
+  int timeout_ms = opts.timeout_ms;
+  int start = opts.start;
+  int zero_opts_defaults;
+
+  if (target == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+  if (copy_string(target_buf, sizeof(target_buf), target, NULL, 0) != 0) {
+    errno = ENAMETOOLONG;
+    return NULL;
+  }
+
+  trimmed_target = trim(target_buf);
+  if (trimmed_target[0] == '\0') {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  if (timeout_ms <= 0) {
+    timeout_ms = HOLONS_CONNECT_DEFAULT_TIMEOUT_MS;
+  }
+
+  transport = opts.transport;
+  if (transport == NULL || transport[0] == '\0') {
+    transport = "tcp";
+  }
+  if (copy_string(transport_buf, sizeof(transport_buf), transport, NULL, 0) != 0) {
+    errno = EINVAL;
+    return NULL;
+  }
+  transport = trim(transport_buf);
+  if (transport[0] == '\0') {
+    transport = "tcp";
+  }
+  for (size_t i = 0; transport[i] != '\0'; ++i) {
+    transport_buf[i] = (char)tolower((unsigned char)transport[i]);
+  }
+  transport = transport_buf;
+
+  zero_opts_defaults =
+      opts.timeout_ms == 0 && is_blank_string(opts.transport) && is_blank_string(opts.port_file) && opts.start == 0;
+  if (zero_opts_defaults) {
+    start = 1;
+  }
+
+  if (strcmp(transport, "tcp") != 0) {
+    errno = ENOTSUP;
+    return NULL;
+  }
+
+  if (is_direct_target(trimmed_target)) {
+    if (wait_for_ready_target(trimmed_target, timeout_ms, err, sizeof(err)) != 0) {
+      errno = ETIMEDOUT;
+      return NULL;
+    }
+    if (normalize_dial_target(trimmed_target, dial_target, sizeof(dial_target), err, sizeof(err)) != 0) {
+      errno = EINVAL;
+      return NULL;
+    }
+    return grpc_insecure_channel_create(dial_target, NULL, NULL);
+  }
+
+  entry = holons_find_by_slug(trimmed_target, err, sizeof(err));
+  if (entry == NULL) {
+    errno = ENOENT;
+    return NULL;
+  }
+
+  if (!is_blank_string(opts.port_file)) {
+    if (copy_string(port_file_buf, sizeof(port_file_buf), opts.port_file, NULL, 0) != 0) {
+      errno = ENAMETOOLONG;
+      holons_free_entries(entry);
+      return NULL;
+    }
+    if (copy_string(port_path, sizeof(port_path), trim(port_file_buf), NULL, 0) != 0) {
+      errno = ENAMETOOLONG;
+      holons_free_entries(entry);
+      return NULL;
+    }
+  } else if (default_port_file_path(entry->slug, port_path, sizeof(port_path), err, sizeof(err)) != 0) {
+    errno = ENAMETOOLONG;
+    holons_free_entries(entry);
+    return NULL;
+  }
+
+  if (usable_port_file(port_path, timeout_ms, started_uri, sizeof(started_uri), err, sizeof(err))) {
+    if (normalize_dial_target(started_uri, dial_target, sizeof(dial_target), err, sizeof(err)) != 0) {
+      errno = EINVAL;
+      holons_free_entries(entry);
+      return NULL;
+    }
+    holons_free_entries(entry);
+    return grpc_insecure_channel_create(dial_target, NULL, NULL);
+  }
+
+  if (!start) {
+    errno = ENOENT;
+    holons_free_entries(entry);
+    return NULL;
+  }
+
+  if (resolve_binary_path(entry, binary_path, sizeof(binary_path), err, sizeof(err)) != 0) {
+    errno = ENOENT;
+    holons_free_entries(entry);
+    return NULL;
+  }
+  if (start_tcp_holon(binary_path,
+                      timeout_ms,
+                      started_uri,
+                      sizeof(started_uri),
+                      &pid,
+                      &output_fd,
+                      err,
+                      sizeof(err)) != 0) {
+    errno = ETIMEDOUT;
+    holons_free_entries(entry);
+    return NULL;
+  }
+  if (wait_for_ready_target(started_uri, timeout_ms, err, sizeof(err)) != 0) {
+    (void)stop_started_process(pid);
+    if (output_fd >= 0) {
+      (void)close(output_fd);
+    }
+    errno = ETIMEDOUT;
+    holons_free_entries(entry);
+    return NULL;
+  }
+  if (normalize_dial_target(started_uri, dial_target, sizeof(dial_target), err, sizeof(err)) != 0) {
+    (void)stop_started_process(pid);
+    if (output_fd >= 0) {
+      (void)close(output_fd);
+    }
+    errno = EINVAL;
+    holons_free_entries(entry);
+    return NULL;
+  }
+
+  channel = grpc_insecure_channel_create(dial_target, NULL, NULL);
+  if (channel == NULL) {
+    (void)stop_started_process(pid);
+    if (output_fd >= 0) {
+      (void)close(output_fd);
+    }
+    holons_free_entries(entry);
+    return NULL;
+  }
+
+  if (!ephemeral && write_port_file(port_path, started_uri, err, sizeof(err)) != 0) {
+    grpc_channel_destroy(channel);
+    (void)stop_started_process(pid);
+    if (output_fd >= 0) {
+      (void)close(output_fd);
+    }
+    errno = EIO;
+    holons_free_entries(entry);
+    return NULL;
+  }
+
+  if (remember_started_channel(channel, pid, ephemeral, output_fd) != 0) {
+    grpc_channel_destroy(channel);
+    (void)stop_started_process(pid);
+    if (output_fd >= 0) {
+      (void)close(output_fd);
+    }
+    errno = ENOMEM;
+    holons_free_entries(entry);
+    return NULL;
+  }
+
+  holons_free_entries(entry);
+  return channel;
+}
+
+grpc_channel *holons_connect(const char *target) {
+  holons_connect_options opts;
+
+  opts.timeout_ms = HOLONS_CONNECT_DEFAULT_TIMEOUT_MS;
+  opts.transport = "tcp";
+  opts.start = 1;
+  opts.port_file = NULL;
+  return connect_internal(target, opts, 1);
+}
+
+grpc_channel *holons_connect_with_opts(const char *target, holons_connect_options opts) {
+  return connect_internal(target, opts, 0);
+}
+
+void holons_disconnect(grpc_channel *channel) {
+  holons_started_channel_t *started;
+
+  if (channel == NULL) {
+    return;
+  }
+
+  started = take_started_channel(channel);
+  grpc_channel_destroy(channel);
+
+  if (started == NULL) {
+    return;
+  }
+
+  if (started->ephemeral) {
+    (void)stop_started_process(started->pid);
+  }
+  if (started->output_fd >= 0) {
+    (void)close(started->output_fd);
+  }
+  free(started);
 }
 
 void holons_free_entries(holon_entry_t *entries) { free(entries); }

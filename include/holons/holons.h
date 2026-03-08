@@ -88,6 +88,14 @@ typedef struct {
 } holons_listener_t;
 
 typedef int (*holons_conn_handler_t)(const holons_conn_t *conn, void *ctx);
+typedef struct grpc_channel grpc_channel;
+
+typedef struct {
+  int timeout_ms;
+  const char *transport;
+  int start;
+  const char *port_file;
+} holons_connect_options;
 
 const char *holons_default_uri(void);
 holons_scheme_t holons_scheme_from_uri(const char *uri);
@@ -130,6 +138,10 @@ int holons_discover_all(holon_entry_t **entries, size_t *count, char *err, size_
 holon_entry_t *holons_find_by_slug(const char *slug, char *err, size_t err_len);
 holon_entry_t *holons_find_by_uuid(const char *prefix, char *err, size_t err_len);
 void holons_free_entries(holon_entry_t *entries);
+
+grpc_channel *holons_connect(const char *target);
+grpc_channel *holons_connect_with_opts(const char *target, holons_connect_options opts);
+void holons_disconnect(grpc_channel *channel);
 
 volatile sig_atomic_t *holons_stop_token(void);
 void holons_request_stop(void);

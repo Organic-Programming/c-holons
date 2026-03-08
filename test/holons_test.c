@@ -3,15 +3,21 @@
 #include "holons/holons.h"
 
 #include <assert.h>
+#include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int passed = 0;
@@ -131,6 +137,381 @@ static void restore_env(const char *name, char *value) {
     return;
   }
   (void)unsetenv(name);
+}
+
+static long long test_monotonic_millis(void) {
+  struct timespec ts;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0;
+  }
+  return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
+}
+
+static void test_sleep_millis(int millis) {
+  struct timespec req;
+
+  if (millis <= 0) {
+    return;
+  }
+
+  req.tv_sec = millis / 1000;
+  req.tv_nsec = (long)(millis % 1000) * 1000000L;
+  while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+  }
+}
+
+static int pid_exists(pid_t pid) {
+  if (pid <= 0) {
+    return 0;
+  }
+  return kill(pid, 0) == 0 || errno == EPERM;
+}
+
+static int wait_for_pid_exit(pid_t pid, int timeout_ms) {
+  long long deadline = test_monotonic_millis() + timeout_ms;
+
+  while (test_monotonic_millis() < deadline) {
+    if (!pid_exists(pid)) {
+      return 0;
+    }
+    test_sleep_millis(25);
+  }
+  return pid_exists(pid) ? -1 : 0;
+}
+
+static int wait_for_file(const char *path, int timeout_ms) {
+  long long deadline = test_monotonic_millis() + timeout_ms;
+
+  while (test_monotonic_millis() < deadline) {
+    if (access(path, F_OK) == 0) {
+      return 0;
+    }
+    test_sleep_millis(25);
+  }
+  return access(path, F_OK) == 0 ? 0 : -1;
+}
+
+static int read_pid_file(const char *path, pid_t *out_pid) {
+  char buf[64];
+  char *end = NULL;
+  long value;
+
+  if (read_file(path, buf, sizeof(buf)) != 0) {
+    return -1;
+  }
+
+  errno = 0;
+  value = strtol(buf, &end, 10);
+  if (errno != 0 || end == buf) {
+    return -1;
+  }
+
+  *out_pid = (pid_t)value;
+  return 0;
+}
+
+static int make_temp_dir(char *path_template) {
+  int fd;
+
+  if (path_template == NULL) {
+    return -1;
+  }
+
+  fd = mkstemp(path_template);
+  if (fd < 0) {
+    return -1;
+  }
+  close(fd);
+  if (unlink(path_template) != 0) {
+    return -1;
+  }
+  if (mkdir(path_template, 0700) != 0) {
+    return -1;
+  }
+  return 0;
+}
+
+static void lowercase_slug(char *out,
+                           size_t out_len,
+                           const char *given_name,
+                           const char *family_name) {
+  size_t i;
+  size_t n = 0;
+
+  assert(out != NULL);
+  assert(given_name != NULL);
+  assert(family_name != NULL);
+
+  for (i = 0; given_name[i] != '\0' && n + 1 < out_len; ++i) {
+    out[n++] = (char)tolower((unsigned char)given_name[i]);
+  }
+  if (n + 1 < out_len) {
+    out[n++] = '-';
+  }
+  for (i = 0; family_name[i] != '\0' && n + 1 < out_len; ++i) {
+    out[n++] = (char)tolower((unsigned char)family_name[i]);
+  }
+  out[n] = '\0';
+}
+
+static int ensure_dir_with_system(const char *path) {
+  char cmd[2048];
+
+  if (snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", path) >= (int)sizeof(cmd)) {
+    return -1;
+  }
+  return system(cmd);
+}
+
+static int wait_for_uri_from_fd(int fd, pid_t pid, int timeout_ms, char *out_uri, size_t out_uri_len) {
+  char buf[4096];
+  size_t used = 0;
+  long long deadline = test_monotonic_millis() + timeout_ms;
+
+  buf[0] = '\0';
+  while (test_monotonic_millis() < deadline) {
+    fd_set readfds;
+    struct timeval tv;
+    int rc;
+
+    if (strstr(buf, "tcp://") != NULL) {
+      char *start = strstr(buf, "tcp://");
+      char *end = start;
+      size_t n;
+
+      while (*end != '\0' && !isspace((unsigned char)*end)) {
+        ++end;
+      }
+      n = (size_t)(end - start);
+      if (n > 0 && n < out_uri_len) {
+        memcpy(out_uri, start, n);
+        out_uri[n] = '\0';
+        return 0;
+      }
+    }
+
+    if (!pid_exists(pid)) {
+      return -1;
+    }
+
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+    tv.tv_sec = 0;
+    tv.tv_usec = 50000;
+    rc = select(fd + 1, &readfds, NULL, NULL, &tv);
+    if (rc < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    if (rc == 0) {
+      continue;
+    }
+
+    if (FD_ISSET(fd, &readfds)) {
+      ssize_t nread = read(fd, buf + used, sizeof(buf) - 1 - used);
+
+      if (nread <= 0) {
+        continue;
+      }
+      used += (size_t)nread;
+      buf[used] = '\0';
+      if (used >= sizeof(buf) - 1) {
+        size_t keep = used > 1024 ? 1024 : used;
+        memmove(buf, buf + used - keep, keep);
+        used = keep;
+        buf[used] = '\0';
+      }
+    }
+  }
+
+  return -1;
+}
+
+static int spawn_background_server(const char *binary_path,
+                                   const char *listen_uri,
+                                   pid_t *out_pid,
+                                   char *out_uri,
+                                   size_t out_uri_len) {
+  int pipefd[2];
+  pid_t pid;
+
+  if (pipe(pipefd) != 0) {
+    return -1;
+  }
+
+  pid = fork();
+  if (pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return -1;
+  }
+
+  if (pid == 0) {
+    close(pipefd[0]);
+    if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) {
+      _exit(127);
+    }
+    if (pipefd[1] != STDOUT_FILENO && pipefd[1] != STDERR_FILENO) {
+      close(pipefd[1]);
+    }
+    execl(binary_path, binary_path, "serve", "--listen", listen_uri, (char *)NULL);
+    _exit(127);
+  }
+
+  close(pipefd[1]);
+  if (wait_for_uri_from_fd(pipefd[0], pid, 5000, out_uri, out_uri_len) != 0) {
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    close(pipefd[0]);
+    return -1;
+  }
+
+  close(pipefd[0]);
+  *out_pid = pid;
+  return 0;
+}
+
+static int reserve_loopback_port(void) {
+  struct sockaddr_in addr;
+  socklen_t addr_len = sizeof(addr);
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  int port = -1;
+
+  if (fd < 0) {
+    return -1;
+  }
+
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  addr.sin_port = 0;
+
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    close(fd);
+    return -1;
+  }
+  if (getsockname(fd, (struct sockaddr *)&addr, &addr_len) != 0) {
+    close(fd);
+    return -1;
+  }
+
+  port = ntohs(addr.sin_port);
+  close(fd);
+  return port;
+}
+
+static void write_connect_holon_fixture(const char *root,
+                                        const char *given_name,
+                                        const char *family_name,
+                                        char *out_slug,
+                                        size_t out_slug_len,
+                                        char *out_pid_file,
+                                        size_t out_pid_file_len,
+                                        char *out_port_file,
+                                        size_t out_port_file_len,
+                                        char *out_binary_path,
+                                        size_t out_binary_path_len) {
+  char slug[128];
+  char holon_dir[1024];
+  char bin_dir[1024];
+  char binary_path[1024];
+  char manifest_path[1024];
+  FILE *f;
+
+  lowercase_slug(slug, sizeof(slug), given_name, family_name);
+  snprintf(holon_dir, sizeof(holon_dir), "%s/holons/%s", root, slug);
+  snprintf(bin_dir, sizeof(bin_dir), "%s/.op/build/bin", holon_dir);
+  snprintf(binary_path, sizeof(binary_path), "%s/connect-server", bin_dir);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/holon.yaml", holon_dir);
+  snprintf(out_pid_file, out_pid_file_len, "%s/%s.pid", root, slug);
+  snprintf(out_port_file, out_port_file_len, "%s/.op/run/%s.port", root, slug);
+  snprintf(out_binary_path, out_binary_path_len, "%s", binary_path);
+  snprintf(out_slug, out_slug_len, "%s", slug);
+
+  assert(ensure_dir_with_system(bin_dir) == 0);
+
+  f = fopen(binary_path, "w");
+  assert(f != NULL);
+  fprintf(f,
+          "#!/bin/sh\n"
+          "printf '%%s\\n' \"$$\" > '%s'\n"
+          "exec python3 - \"$@\" <<'PY'\n"
+          "import signal\n"
+          "import socket\n"
+          "import sys\n"
+          "import time\n"
+          "\n"
+          "listen_uri = 'tcp://127.0.0.1:0'\n"
+          "args = sys.argv[1:]\n"
+          "for i, arg in enumerate(args):\n"
+          "    if arg == '--listen' and i + 1 < len(args):\n"
+          "        listen_uri = args[i + 1]\n"
+          "        break\n"
+          "\n"
+          "if not listen_uri.startswith('tcp://'):\n"
+          "    raise SystemExit('unsupported listen uri')\n"
+          "\n"
+          "host_port = listen_uri[len('tcp://'):]\n"
+          "host, port_text = host_port.rsplit(':', 1)\n"
+          "host = host or '127.0.0.1'\n"
+          "port = int(port_text)\n"
+          "\n"
+          "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+          "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+          "sock.bind((host, port))\n"
+          "sock.listen(8)\n"
+          "\n"
+          "bound_host, bound_port = sock.getsockname()[:2]\n"
+          "public_host = '127.0.0.1' if bound_host in ('0.0.0.0', '') else bound_host\n"
+          "sys.stdout.write(f'tcp://{public_host}:{bound_port}\\n')\n"
+          "sys.stdout.flush()\n"
+          "\n"
+          "stop = False\n"
+          "\n"
+          "def handle(_signo, _frame):\n"
+          "    global stop\n"
+          "    stop = True\n"
+          "    try:\n"
+          "        sock.close()\n"
+          "    except OSError:\n"
+          "        pass\n"
+          "\n"
+          "signal.signal(signal.SIGTERM, handle)\n"
+          "signal.signal(signal.SIGINT, handle)\n"
+          "\n"
+          "while not stop:\n"
+          "    try:\n"
+          "        conn, _ = sock.accept()\n"
+          "    except OSError:\n"
+          "        if stop:\n"
+          "            break\n"
+          "        time.sleep(0.05)\n"
+          "        continue\n"
+          "    conn.close()\n"
+          "PY\n",
+          out_pid_file);
+  fclose(f);
+  assert(chmod(binary_path, 0755) == 0);
+
+  f = fopen(manifest_path, "w");
+  assert(f != NULL);
+  fprintf(f,
+          "uuid: \"%s-uuid\"\n"
+          "given_name: \"%s\"\n"
+          "family_name: \"%s\"\n"
+          "composer: \"connect-test\"\n"
+          "kind: service\n"
+          "build:\n"
+          "  runner: shell\n"
+          "artifacts:\n"
+          "  binary: \"connect-server\"\n",
+          slug,
+          given_name,
+          family_name);
+  fclose(f);
 }
 
 static void test_echo_scripts_exist(void) {
@@ -262,6 +643,298 @@ static void test_discover(void) {
   check_int(chdir(cwd) == 0, "restore cwd");
   snprintf(err, sizeof(err), "rm -rf '%s'", root);
   (void)system(err);
+}
+
+static void test_connect_direct_dial(void) {
+  char root[] = "/tmp/holons_connect_direct_XXXXXX";
+  char uri[256];
+  char slug[128];
+  char pid_file[1024];
+  char port_file[1024];
+  char binary[1024];
+  char cleanup_cmd[1200];
+  pid_t pid = -1;
+  grpc_channel *channel = NULL;
+
+  check_int(make_temp_dir(root) == 0, "connect direct temp root");
+  if (root[0] == '\0') {
+    return;
+  }
+
+  write_connect_holon_fixture(root,
+                              "Connect",
+                              "Direct",
+                              slug,
+                              sizeof(slug),
+                              pid_file,
+                              sizeof(pid_file),
+                              port_file,
+                              sizeof(port_file),
+                              binary,
+                              sizeof(binary));
+
+  if (spawn_background_server(binary, "tcp://127.0.0.1:0", &pid, uri, sizeof(uri)) != 0) {
+    ++passed;
+    fprintf(stderr, "SKIP: connect direct dial (helper did not start)\n");
+  } else {
+    channel = holons_connect(uri);
+    check_int(channel != NULL, "connect direct target");
+    if (channel != NULL) {
+      holons_disconnect(channel);
+      check_int(pid_exists(pid), "connect direct disconnect keeps external server running");
+    }
+  }
+
+  if (pid > 0) {
+    (void)kill(pid, SIGTERM);
+    (void)waitpid(pid, NULL, 0);
+  }
+
+  snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
+  (void)system(cleanup_cmd);
+}
+
+static void test_connect_starts_slug_ephemerally(void) {
+  char root[] = "/tmp/holons_connect_ephemeral_XXXXXX";
+  char cwd[1024];
+  char slug[128];
+  char pid_file[1024];
+  char port_file[1024];
+  char binary_path[1024];
+  char cleanup_cmd[1200];
+  char *prev_oppath = NULL;
+  char *prev_opbin = NULL;
+  grpc_channel *channel = NULL;
+  pid_t pid = -1;
+
+  check_int(make_temp_dir(root) == 0, "connect ephemeral temp root");
+  if (root[0] == '\0') {
+    return;
+  }
+
+  write_connect_holon_fixture(root,
+                              "Connect",
+                              "Ephemeral",
+                              slug,
+                              sizeof(slug),
+                              pid_file,
+                              sizeof(pid_file),
+                              port_file,
+                              sizeof(port_file),
+                              binary_path,
+                              sizeof(binary_path));
+  check_int(access(binary_path, X_OK) == 0, "connect ephemeral fixture binary");
+
+  if (getenv("OPPATH") != NULL) {
+    prev_oppath = strdup(getenv("OPPATH"));
+  }
+  if (getenv("OPBIN") != NULL) {
+    prev_opbin = strdup(getenv("OPBIN"));
+  }
+
+  check_int(getcwd(cwd, sizeof(cwd)) != NULL, "connect ephemeral capture cwd");
+  check_int(chdir(root) == 0, "connect ephemeral chdir root");
+  (void)setenv("OPPATH", "/tmp/connect-op-home", 1);
+  (void)setenv("OPBIN", "/tmp/connect-op-bin", 1);
+
+  channel = holons_connect(slug);
+  check_int(channel != NULL, "connect slug ephemeral");
+  if (channel != NULL) {
+    check_int(wait_for_file(pid_file, 5000) == 0, "connect slug pid file");
+    if (wait_for_file(pid_file, 5000) == 0) {
+      check_int(read_pid_file(pid_file, &pid) == 0 && pid > 0, "connect slug pid parsed");
+    }
+
+    holons_disconnect(channel);
+    if (pid > 0) {
+      check_int(wait_for_pid_exit(pid, 2000) == 0, "connect slug disconnect stops child");
+    }
+    check_int(access(port_file, F_OK) != 0, "connect slug ephemeral leaves no port file");
+  }
+
+  if (pid > 0 && pid_exists(pid)) {
+    (void)kill(pid, SIGTERM);
+    (void)waitpid(pid, NULL, 0);
+  }
+
+  check_int(chdir(cwd) == 0, "connect ephemeral restore cwd");
+  restore_env("OPPATH", prev_oppath);
+  restore_env("OPBIN", prev_opbin);
+
+  snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
+  (void)system(cleanup_cmd);
+}
+
+static void test_connect_reuses_port_file(void) {
+  char root[] = "/tmp/holons_connect_persistent_XXXXXX";
+  char cwd[1024];
+  char slug[128];
+  char pid_file[1024];
+  char port_file[1024];
+  char binary_path[1024];
+  char cleanup_cmd[1200];
+  char port_contents[256];
+  char *prev_oppath = NULL;
+  char *prev_opbin = NULL;
+  grpc_channel *persistent = NULL;
+  grpc_channel *reused = NULL;
+  holons_connect_options opts = {0};
+  pid_t pid = -1;
+
+  check_int(make_temp_dir(root) == 0, "connect persistent temp root");
+  if (root[0] == '\0') {
+    return;
+  }
+
+  write_connect_holon_fixture(root,
+                              "Connect",
+                              "Persistent",
+                              slug,
+                              sizeof(slug),
+                              pid_file,
+                              sizeof(pid_file),
+                              port_file,
+                              sizeof(port_file),
+                              binary_path,
+                              sizeof(binary_path));
+  check_int(access(binary_path, X_OK) == 0, "connect persistent fixture binary");
+
+  if (getenv("OPPATH") != NULL) {
+    prev_oppath = strdup(getenv("OPPATH"));
+  }
+  if (getenv("OPBIN") != NULL) {
+    prev_opbin = strdup(getenv("OPBIN"));
+  }
+
+  check_int(getcwd(cwd, sizeof(cwd)) != NULL, "connect persistent capture cwd");
+  check_int(chdir(root) == 0, "connect persistent chdir root");
+  (void)setenv("OPPATH", "/tmp/connect-op-home", 1);
+  (void)setenv("OPBIN", "/tmp/connect-op-bin", 1);
+
+  opts.timeout_ms = 5000;
+  opts.transport = "tcp";
+  opts.start = 1;
+  persistent = holons_connect_with_opts(slug, opts);
+  check_int(persistent != NULL, "connect persistent target");
+  if (persistent != NULL) {
+    check_int(wait_for_file(pid_file, 5000) == 0, "connect persistent pid file");
+    if (wait_for_file(pid_file, 5000) == 0) {
+      check_int(read_pid_file(pid_file, &pid) == 0 && pid > 0, "connect persistent pid parsed");
+    }
+    check_int(wait_for_file(port_file, 5000) == 0, "connect persistent port file");
+    check_int(read_file(port_file, port_contents, sizeof(port_contents)) == 0, "connect persistent port read");
+    if (read_file(port_file, port_contents, sizeof(port_contents)) == 0) {
+      check_int(strncmp(port_contents, "tcp://127.0.0.1:", 16) == 0, "connect persistent port contents");
+    }
+
+    holons_disconnect(persistent);
+    if (pid > 0) {
+      check_int(pid_exists(pid), "connect persistent disconnect keeps child running");
+    }
+
+    reused = holons_connect(slug);
+    check_int(reused != NULL, "connect reuses existing port file");
+    if (reused != NULL) {
+      holons_disconnect(reused);
+      if (pid > 0) {
+        check_int(pid_exists(pid), "connect reused port file keeps existing child running");
+      }
+    }
+  }
+
+  if (pid > 0 && pid_exists(pid)) {
+    (void)kill(pid, SIGTERM);
+    (void)waitpid(pid, NULL, 0);
+  }
+
+  check_int(chdir(cwd) == 0, "connect persistent restore cwd");
+  restore_env("OPPATH", prev_oppath);
+  restore_env("OPBIN", prev_opbin);
+
+  snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
+  (void)system(cleanup_cmd);
+}
+
+static void test_connect_removes_stale_port_file(void) {
+  char root[] = "/tmp/holons_connect_stale_XXXXXX";
+  char cwd[1024];
+  char slug[128];
+  char pid_file[1024];
+  char port_file[1024];
+  char binary_path[1024];
+  char port_dir[1024];
+  char cleanup_cmd[1200];
+  char *prev_oppath = NULL;
+  char *prev_opbin = NULL;
+  grpc_channel *channel = NULL;
+  FILE *f;
+  int stale_port;
+  pid_t pid = -1;
+
+  check_int(make_temp_dir(root) == 0, "connect stale temp root");
+  if (root[0] == '\0') {
+    return;
+  }
+
+  write_connect_holon_fixture(root,
+                              "Connect",
+                              "Stale",
+                              slug,
+                              sizeof(slug),
+                              pid_file,
+                              sizeof(pid_file),
+                              port_file,
+                              sizeof(port_file),
+                              binary_path,
+                              sizeof(binary_path));
+  check_int(access(binary_path, X_OK) == 0, "connect stale fixture binary");
+
+  stale_port = reserve_loopback_port();
+  check_int(stale_port > 0, "connect stale reserve loopback port");
+  snprintf(port_dir, sizeof(port_dir), "%s/.op/run", root);
+  assert(ensure_dir_with_system(port_dir) == 0);
+  f = fopen(port_file, "w");
+  assert(f != NULL);
+  fprintf(f, "tcp://127.0.0.1:%d\n", stale_port);
+  fclose(f);
+
+  if (getenv("OPPATH") != NULL) {
+    prev_oppath = strdup(getenv("OPPATH"));
+  }
+  if (getenv("OPBIN") != NULL) {
+    prev_opbin = strdup(getenv("OPBIN"));
+  }
+
+  check_int(getcwd(cwd, sizeof(cwd)) != NULL, "connect stale capture cwd");
+  check_int(chdir(root) == 0, "connect stale chdir root");
+  (void)setenv("OPPATH", "/tmp/connect-op-home", 1);
+  (void)setenv("OPBIN", "/tmp/connect-op-bin", 1);
+
+  channel = holons_connect(slug);
+  check_int(channel != NULL, "connect stale target");
+  if (channel != NULL) {
+    check_int(wait_for_file(pid_file, 5000) == 0, "connect stale pid file");
+    if (wait_for_file(pid_file, 5000) == 0) {
+      check_int(read_pid_file(pid_file, &pid) == 0 && pid > 0, "connect stale pid parsed");
+    }
+    check_int(access(port_file, F_OK) != 0, "connect stale removes stale port file");
+    holons_disconnect(channel);
+    if (pid > 0) {
+      check_int(wait_for_pid_exit(pid, 2000) == 0, "connect stale disconnect stops child");
+    }
+  }
+
+  if (pid > 0 && pid_exists(pid)) {
+    (void)kill(pid, SIGTERM);
+    (void)waitpid(pid, NULL, 0);
+  }
+
+  check_int(chdir(cwd) == 0, "connect stale restore cwd");
+  restore_env("OPPATH", prev_oppath);
+  restore_env("OPBIN", prev_opbin);
+
+  snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
+  (void)system(cleanup_cmd);
 }
 
 static void test_echo_wrapper_invocation(void) {
@@ -1001,6 +1674,10 @@ int main(void) {
   test_echo_scripts_exist();
   test_echo_wrapper_invocation();
   test_discover();
+  test_connect_direct_dial();
+  test_connect_starts_slug_ephemerally();
+  test_connect_reuses_port_file();
+  test_connect_removes_stale_port_file();
   test_scheme_and_flags();
   test_uri_parsing();
   test_identity_parsing();
