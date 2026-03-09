@@ -2227,6 +2227,96 @@ static int start_tcp_holon(const char *binary_path,
   return 0;
 }
 
+static int start_stdio_holon(const char *binary_path,
+                             int timeout_ms,
+                             pid_t *out_pid,
+                             int *out_fd,
+                             char *err,
+                             size_t err_len) {
+  int stdin_pipe[2] = {-1, -1};
+  int devnull_fd = -1;
+  pid_t pid;
+  long long deadline;
+
+  if (binary_path == NULL || binary_path[0] == '\0') {
+    set_err(err, err_len, "binary path is required");
+    return -1;
+  }
+
+  if (pipe(stdin_pipe) != 0) {
+    set_err(err, err_len, "pipe() failed: %s", strerror(errno));
+    return -1;
+  }
+
+  devnull_fd = open("/dev/null", O_WRONLY);
+  if (devnull_fd < 0) {
+    set_err(err, err_len, "open(/dev/null) failed: %s", strerror(errno));
+    (void)close(stdin_pipe[0]);
+    (void)close(stdin_pipe[1]);
+    return -1;
+  }
+
+  pid = fork();
+  if (pid < 0) {
+    set_err(err, err_len, "fork() failed: %s", strerror(errno));
+    (void)close(stdin_pipe[0]);
+    (void)close(stdin_pipe[1]);
+    (void)close(devnull_fd);
+    return -1;
+  }
+
+  if (pid == 0) {
+    (void)close(stdin_pipe[1]);
+    if (dup2(stdin_pipe[0], STDIN_FILENO) < 0 || dup2(devnull_fd, STDOUT_FILENO) < 0 ||
+        dup2(devnull_fd, STDERR_FILENO) < 0) {
+      _exit(127);
+    }
+    if (stdin_pipe[0] != STDIN_FILENO) {
+      (void)close(stdin_pipe[0]);
+    }
+    if (devnull_fd != STDOUT_FILENO && devnull_fd != STDERR_FILENO) {
+      (void)close(devnull_fd);
+    }
+    execl(binary_path, binary_path, "serve", "--listen", "stdio://", (char *)NULL);
+    _exit(127);
+  }
+
+  (void)close(stdin_pipe[0]);
+  (void)close(devnull_fd);
+
+  deadline = monotonic_millis() + (timeout_ms > 0 && timeout_ms < 200 ? timeout_ms : 200);
+  for (;;) {
+    int status;
+    pid_t waited = waitpid(pid, &status, WNOHANG);
+
+    if (waited == pid) {
+      set_err(err, err_len, "holon exited before stdio startup");
+      (void)close(stdin_pipe[1]);
+      return -1;
+    }
+    if (waited < 0 && errno != EINTR && errno != ECHILD) {
+      set_err(err, err_len, "waitpid(%ld) failed: %s", (long)pid, strerror(errno));
+      (void)close(stdin_pipe[1]);
+      return -1;
+    }
+    if (monotonic_millis() >= deadline) {
+      break;
+    }
+    sleep_millis(10);
+  }
+
+  if (out_pid != NULL) {
+    *out_pid = pid;
+  }
+  if (out_fd != NULL) {
+    *out_fd = stdin_pipe[1];
+  } else {
+    (void)close(stdin_pipe[1]);
+  }
+
+  return 0;
+}
+
 static int resolve_binary_path(const holon_entry_t *entry,
                                char *out,
                                size_t out_len,
@@ -2373,6 +2463,7 @@ static grpc_channel *connect_internal(const char *target, holons_connect_options
   int output_fd = -1;
   int timeout_ms = opts.timeout_ms;
   int start = opts.start;
+  int ephemeral_mode;
   int zero_opts_defaults;
 
   if (target == NULL) {
@@ -2396,7 +2487,7 @@ static grpc_channel *connect_internal(const char *target, holons_connect_options
 
   transport = opts.transport;
   if (transport == NULL || transport[0] == '\0') {
-    transport = "tcp";
+    transport = "stdio";
   }
   if (copy_string(transport_buf, sizeof(transport_buf), transport, NULL, 0) != 0) {
     errno = EINVAL;
@@ -2404,7 +2495,7 @@ static grpc_channel *connect_internal(const char *target, holons_connect_options
   }
   transport = trim(transport_buf);
   if (transport[0] == '\0') {
-    transport = "tcp";
+    transport = "stdio";
   }
   for (size_t i = 0; transport[i] != '\0'; ++i) {
     transport_buf[i] = (char)tolower((unsigned char)transport[i]);
@@ -2416,8 +2507,9 @@ static grpc_channel *connect_internal(const char *target, holons_connect_options
   if (zero_opts_defaults) {
     start = 1;
   }
+  ephemeral_mode = ephemeral || strcmp(transport, "stdio") == 0;
 
-  if (strcmp(transport, "tcp") != 0) {
+  if (strcmp(transport, "tcp") != 0 && strcmp(transport, "stdio") != 0) {
     errno = ENOTSUP;
     return NULL;
   }
@@ -2478,38 +2570,47 @@ static grpc_channel *connect_internal(const char *target, holons_connect_options
     holons_free_entries(entry);
     return NULL;
   }
-  if (start_tcp_holon(binary_path,
-                      timeout_ms,
-                      started_uri,
-                      sizeof(started_uri),
-                      &pid,
-                      &output_fd,
-                      err,
-                      sizeof(err)) != 0) {
-    errno = ETIMEDOUT;
-    holons_free_entries(entry);
-    return NULL;
-  }
-  if (wait_for_ready_target(started_uri, timeout_ms, err, sizeof(err)) != 0) {
-    (void)stop_started_process(pid);
-    if (output_fd >= 0) {
-      (void)close(output_fd);
+  if (strcmp(transport, "stdio") == 0) {
+    if (start_stdio_holon(binary_path, timeout_ms, &pid, &output_fd, err, sizeof(err)) != 0) {
+      errno = ETIMEDOUT;
+      holons_free_entries(entry);
+      return NULL;
     }
-    errno = ETIMEDOUT;
-    holons_free_entries(entry);
-    return NULL;
-  }
-  if (normalize_dial_target(started_uri, dial_target, sizeof(dial_target), err, sizeof(err)) != 0) {
-    (void)stop_started_process(pid);
-    if (output_fd >= 0) {
-      (void)close(output_fd);
+    channel = grpc_insecure_channel_create("stdio://", NULL, NULL);
+  } else {
+    if (start_tcp_holon(binary_path,
+                        timeout_ms,
+                        started_uri,
+                        sizeof(started_uri),
+                        &pid,
+                        &output_fd,
+                        err,
+                        sizeof(err)) != 0) {
+      errno = ETIMEDOUT;
+      holons_free_entries(entry);
+      return NULL;
     }
-    errno = EINVAL;
-    holons_free_entries(entry);
-    return NULL;
-  }
+    if (wait_for_ready_target(started_uri, timeout_ms, err, sizeof(err)) != 0) {
+      (void)stop_started_process(pid);
+      if (output_fd >= 0) {
+        (void)close(output_fd);
+      }
+      errno = ETIMEDOUT;
+      holons_free_entries(entry);
+      return NULL;
+    }
+    if (normalize_dial_target(started_uri, dial_target, sizeof(dial_target), err, sizeof(err)) != 0) {
+      (void)stop_started_process(pid);
+      if (output_fd >= 0) {
+        (void)close(output_fd);
+      }
+      errno = EINVAL;
+      holons_free_entries(entry);
+      return NULL;
+    }
 
-  channel = grpc_insecure_channel_create(dial_target, NULL, NULL);
+    channel = grpc_insecure_channel_create(dial_target, NULL, NULL);
+  }
   if (channel == NULL) {
     (void)stop_started_process(pid);
     if (output_fd >= 0) {
@@ -2519,7 +2620,7 @@ static grpc_channel *connect_internal(const char *target, holons_connect_options
     return NULL;
   }
 
-  if (!ephemeral && write_port_file(port_path, started_uri, err, sizeof(err)) != 0) {
+  if (!ephemeral_mode && strcmp(transport, "tcp") == 0 && write_port_file(port_path, started_uri, err, sizeof(err)) != 0) {
     grpc_channel_destroy(channel);
     (void)stop_started_process(pid);
     if (output_fd >= 0) {
@@ -2530,7 +2631,7 @@ static grpc_channel *connect_internal(const char *target, holons_connect_options
     return NULL;
   }
 
-  if (remember_started_channel(channel, pid, ephemeral, output_fd) != 0) {
+  if (remember_started_channel(channel, pid, ephemeral_mode, output_fd) != 0) {
     grpc_channel_destroy(channel);
     (void)stop_started_process(pid);
     if (output_fd >= 0) {
@@ -2549,7 +2650,7 @@ grpc_channel *holons_connect(const char *target) {
   holons_connect_options opts;
 
   opts.timeout_ms = HOLONS_CONNECT_DEFAULT_TIMEOUT_MS;
-  opts.transport = "tcp";
+  opts.transport = "stdio";
   opts.start = 1;
   opts.port_file = NULL;
   return connect_internal(target, opts, 1);

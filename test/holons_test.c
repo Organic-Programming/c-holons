@@ -419,6 +419,7 @@ static void write_connect_holon_fixture(const char *root,
   char bin_dir[1024];
   char binary_path[1024];
   char manifest_path[1024];
+  char args_path[1024];
   FILE *f;
 
   lowercase_slug(slug, sizeof(slug), given_name, family_name);
@@ -426,6 +427,7 @@ static void write_connect_holon_fixture(const char *root,
   snprintf(bin_dir, sizeof(bin_dir), "%s/.op/build/bin", holon_dir);
   snprintf(binary_path, sizeof(binary_path), "%s/connect-server", bin_dir);
   snprintf(manifest_path, sizeof(manifest_path), "%s/holon.yaml", holon_dir);
+  snprintf(args_path, sizeof(args_path), "%s/%s.args", root, slug);
   snprintf(out_pid_file, out_pid_file_len, "%s/%s.pid", root, slug);
   snprintf(out_port_file, out_port_file_len, "%s/.op/run/%s.port", root, slug);
   snprintf(out_binary_path, out_binary_path_len, "%s", binary_path);
@@ -438,6 +440,8 @@ static void write_connect_holon_fixture(const char *root,
   fprintf(f,
           "#!/bin/sh\n"
           "printf '%%s\\n' \"$$\" > '%s'\n"
+          ": > '%s'\n"
+          "for arg in \"$@\"; do printf '%%s\\n' \"$arg\" >> '%s'; done\n"
           "exec python3 - \"$@\" <<'PY'\n"
           "import signal\n"
           "import socket\n"
@@ -450,6 +454,11 @@ static void write_connect_holon_fixture(const char *root,
           "    if arg == '--listen' and i + 1 < len(args):\n"
           "        listen_uri = args[i + 1]\n"
           "        break\n"
+          "\n"
+          "if listen_uri in ('stdio://', 'stdio'):\n"
+          "    for _ in sys.stdin:\n"
+          "        pass\n"
+          "    raise SystemExit(0)\n"
           "\n"
           "if not listen_uri.startswith('tcp://'):\n"
           "    raise SystemExit('unsupported listen uri')\n"
@@ -492,7 +501,9 @@ static void write_connect_holon_fixture(const char *root,
           "        continue\n"
           "    conn.close()\n"
           "PY\n",
-          out_pid_file);
+          out_pid_file,
+          args_path,
+          args_path);
   fclose(f);
   assert(chmod(binary_path, 0755) == 0);
 
@@ -884,6 +895,7 @@ static void test_connect_starts_slug_ephemerally(void) {
   char cwd[1024];
   char slug[128];
   char pid_file[1024];
+  char args_file[1024];
   char port_file[1024];
   char binary_path[1024];
   char cleanup_cmd[1200];
@@ -908,6 +920,7 @@ static void test_connect_starts_slug_ephemerally(void) {
                               sizeof(port_file),
                               binary_path,
                               sizeof(binary_path));
+  snprintf(args_file, sizeof(args_file), "%s/%s.args", root, slug);
   check_int(access(binary_path, X_OK) == 0, "connect ephemeral fixture binary");
 
   if (getenv("OPPATH") != NULL) {
@@ -928,6 +941,15 @@ static void test_connect_starts_slug_ephemerally(void) {
     check_int(wait_for_file(pid_file, 5000) == 0, "connect slug pid file");
     if (wait_for_file(pid_file, 5000) == 0) {
       check_int(read_pid_file(pid_file, &pid) == 0 && pid > 0, "connect slug pid parsed");
+    }
+    check_int(wait_for_file(args_file, 5000) == 0, "connect slug args file");
+    if (wait_for_file(args_file, 5000) == 0) {
+      char args_contents[256];
+      check_int(read_file(args_file, args_contents, sizeof(args_contents)) == 0, "connect slug args read");
+      if (read_file(args_file, args_contents, sizeof(args_contents)) == 0) {
+        check_int(strcmp(args_contents, "serve\n--listen\nstdio://\n") == 0,
+                  "connect slug starts stdio by default");
+      }
     }
 
     holons_disconnect(channel);
