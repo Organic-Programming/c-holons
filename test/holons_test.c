@@ -1318,6 +1318,30 @@ static void test_echo_wrapper_invocation(void) {
               "holon-rpc-server wrapper forwards URI");
   }
 
+  capture[0] = '\0';
+  exit_code = command_exit_code(
+      "./bin/grpc-bridge --backend /tmp/cert-backend --proto-dir /tmp/cert-protos "
+      "--holon-yaml /tmp/cert-holon.yaml --listen stdio:// >/dev/null 2>&1");
+  check_int(exit_code == 0, "grpc-bridge wrapper exit");
+  check_int(read_file(fake_log, capture, sizeof(capture)) == 0,
+            "read grpc-bridge wrapper capture");
+  if (capture[0] != '\0') {
+    check_int(strstr(capture, "PWD=") != NULL && strstr(capture, "/sdk/go-holons") != NULL,
+              "grpc-bridge wrapper cwd");
+    check_int(strstr(capture, "ARG0=run") != NULL, "grpc-bridge wrapper uses go run");
+    check_int(strstr(capture, "grpc-bridge-go/main.go") != NULL,
+              "grpc-bridge wrapper helper path");
+    check_int(strstr(capture, "--backend") != NULL && strstr(capture, "/tmp/cert-backend") != NULL,
+              "grpc-bridge wrapper forwards backend");
+    check_int(strstr(capture, "--proto-dir") != NULL && strstr(capture, "/tmp/cert-protos") != NULL,
+              "grpc-bridge wrapper forwards proto dir");
+    check_int(strstr(capture, "--holon-yaml") != NULL &&
+                  strstr(capture, "/tmp/cert-holon.yaml") != NULL,
+              "grpc-bridge wrapper forwards holon yaml");
+    check_int(strstr(capture, "--listen") != NULL && strstr(capture, "stdio://") != NULL,
+              "grpc-bridge wrapper forwards listen");
+  }
+
   unlink(fake_go);
   unlink(fake_log);
   restore_env("GO_BIN", prev_go_bin);

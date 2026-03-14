@@ -40,7 +40,9 @@ clang -std=c11 -Wall -Wextra -pedantic -I include src/holons.c test/holons_test.
 
 ## Notes
 
-- The library exposes low-level transport dial helpers, not a generic
-  slug-based `connect()` helper.
-- Holon-RPC support currently lives in wrapper binaries, not in the C
-  public API.
+- The C public header stays intentionally small and C-first.
+- Higher-level gRPC runner utilities live in `bin/` wrapper scripts that
+  are owned by the SDK.
+- `bin/grpc-bridge` is the standard daemon-facing runner when a C holon
+  implements unary RPC logic over simple HTTP/JSON and still needs to
+  satisfy the ecosystem-wide gRPC + `Describe` contract.
