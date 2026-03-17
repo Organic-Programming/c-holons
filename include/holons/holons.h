@@ -164,7 +164,6 @@ typedef struct {
   char service_name[HOLONS_MAX_FIELD_LEN];
   char method_name[HOLONS_MAX_FIELD_LEN];
   char proto_dir[HOLONS_MAX_URI_LEN];
-  char holon_yaml_path[HOLONS_MAX_URI_LEN];
 } holons_holonmeta_registration_t;
 
 const char *holons_default_uri(void);
@@ -199,12 +198,10 @@ int holons_serve(const char *listen_uri,
 
 int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size_t err_len);
 int holons_build_describe_response(const char *proto_dir,
-                                   const char *holon_yaml_path,
                                    holons_describe_response_t *out,
                                    char *err,
                                    size_t err_len);
 int holons_make_holonmeta_registration(const char *proto_dir,
-                                       const char *holon_yaml_path,
                                        holons_holonmeta_registration_t *out,
                                        char *err,
                                        size_t err_len);

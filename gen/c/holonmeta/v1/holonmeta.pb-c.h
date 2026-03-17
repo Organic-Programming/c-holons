@@ -52,7 +52,7 @@ struct  Holonmeta__V1__DescribeResponse
 {
   ProtobufCMessage base;
   /*
-   * Holon identity from holon.yaml.
+   * Holon identity from holon.proto.
    */
   char *slug;
   char *motto;

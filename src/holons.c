@@ -240,11 +240,136 @@ static void slug_for_identity(const holons_identity_t *id, char *out, size_t out
   (void)copy_string(out, out_len, slug, NULL, 0);
 }
 
+static int is_api_version_dir(const char *name) {
+  size_t i;
+
+  if (name == NULL || name[0] != 'v' || !isdigit((unsigned char)name[1])) {
+    return 0;
+  }
+  for (i = 2; name[i] != '\0'; ++i) {
+    unsigned char ch = (unsigned char)name[i];
+    if (!isalnum(ch) && ch != '.' && ch != '_' && ch != '-') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int parent_dir_path(const char *path, char *out, size_t out_len, char *err, size_t err_len) {
+  char tmp[PATH_MAX];
+  char *slash;
+
+  if (copy_string(tmp, sizeof(tmp), path, err, err_len) != 0) {
+    return -1;
+  }
+  slash = strrchr(tmp, '/');
+  if (slash == NULL) {
+    return copy_string(out, out_len, ".", err, err_len);
+  }
+  if (slash == tmp) {
+    slash[1] = '\0';
+  } else {
+    *slash = '\0';
+  }
+  return copy_string(out, out_len, tmp, err, err_len);
+}
+
+static int manifest_root_from_path(const char *manifest_path,
+                                   char *out,
+                                   size_t out_len,
+                                   char *err,
+                                   size_t err_len) {
+  char manifest_dir[PATH_MAX];
+  char api_dir[PATH_MAX];
+  const char *version_name;
+  const char *api_name;
+
+  if (parent_dir_path(manifest_path, manifest_dir, sizeof(manifest_dir), err, err_len) != 0) {
+    return -1;
+  }
+  version_name = strrchr(manifest_dir, '/');
+  version_name = version_name != NULL ? version_name + 1 : manifest_dir;
+  if (is_api_version_dir(version_name)) {
+    if (parent_dir_path(manifest_dir, api_dir, sizeof(api_dir), err, err_len) != 0) {
+      return -1;
+    }
+    api_name = strrchr(api_dir, '/');
+    api_name = api_name != NULL ? api_name + 1 : api_dir;
+    if (strcmp(api_name, "api") == 0) {
+      return parent_dir_path(api_dir, out, out_len, err, err_len);
+    }
+  }
+  return copy_string(out, out_len, manifest_dir, err, err_len);
+}
+
+static int split_proto_field_line(char *line, char **key, char **value) {
+  char *sep;
+
+  sep = strchr(line, ':');
+  if (sep == NULL) {
+    return 0;
+  }
+  *sep = '\0';
+  *key = trim(line);
+  *value = trim(sep + 1);
+  *value = strip_quotes(*value);
+  if (strcmp(*value, "null") == 0) {
+    *value = "";
+  }
+  return 1;
+}
+
+static int resolve_manifest_path(const char *root,
+                                 char *out,
+                                 size_t out_len,
+                                 char *err,
+                                 size_t err_len) {
+  char candidate[PATH_MAX];
+  char parent[PATH_MAX];
+  struct stat st;
+  const char *resolved_root = root != NULL && root[0] != '\0' ? root : ".";
+  const char *base;
+
+  base = strrchr(resolved_root, '/');
+  base = base != NULL ? base + 1 : resolved_root;
+  if (strcmp(base, "holon.proto") == 0 && stat(resolved_root, &st) == 0 && S_ISREG(st.st_mode)) {
+    return copy_string(out, out_len, resolved_root, err, err_len);
+  }
+
+  if (snprintf(candidate, sizeof(candidate), "%s/holon.proto", resolved_root) < (int)sizeof(candidate) &&
+      stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
+    return copy_string(out, out_len, candidate, err, err_len);
+  }
+  if (snprintf(candidate, sizeof(candidate), "%s/api/v1/holon.proto", resolved_root) <
+          (int)sizeof(candidate) &&
+      stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
+    return copy_string(out, out_len, candidate, err, err_len);
+  }
+
+  if (strcmp(base, "protos") == 0 || strchr(resolved_root, '/') != NULL) {
+    if (parent_dir_path(resolved_root, parent, sizeof(parent), NULL, 0) == 0) {
+      if (snprintf(candidate, sizeof(candidate), "%s/holon.proto", parent) < (int)sizeof(candidate) &&
+          stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
+        return copy_string(out, out_len, candidate, err, err_len);
+      }
+      if (snprintf(candidate, sizeof(candidate), "%s/api/v1/holon.proto", parent) <
+              (int)sizeof(candidate) &&
+          stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
+        return copy_string(out, out_len, candidate, err, err_len);
+      }
+    }
+  }
+
+  set_err(err, err_len, "no holon.proto found near %s", resolved_root);
+  return -1;
+}
+
 static int parse_manifest_file(const char *path, holons_manifest_t *out, char *err, size_t err_len) {
   FILE *f;
   char line[1024];
-  int saw_mapping = 0;
-  char section[32] = "";
+  int saw_manifest = 0;
+  int in_build = 0;
+  int in_artifacts = 0;
 
   if (path == NULL || out == NULL) {
     set_err(err, err_len, "path and output are required");
@@ -259,54 +384,61 @@ static int parse_manifest_file(const char *path, holons_manifest_t *out, char *e
   }
 
   while (fgets(line, sizeof(line), f) != NULL) {
-    char *raw = ltrim(line);
-    char *sep;
+    char *raw = trim(line);
+    char *key;
     char *value;
-    size_t indent = (size_t)(raw - line);
 
     rtrim(raw);
-    if (raw[0] == '\0' || raw[0] == '#') {
+    if (strstr(raw, "holons.v1.manifest") != NULL) {
+      saw_manifest = 1;
+    }
+    if (raw[0] == '\0' || raw[0] == '#' || (raw[0] == '/' && raw[1] == '/')) {
+      continue;
+    }
+    if (!saw_manifest) {
+      continue;
+    }
+    if (raw[0] == '}') {
+      in_build = 0;
+      in_artifacts = 0;
+      continue;
+    }
+    if (!split_proto_field_line(raw, &key, &value)) {
       continue;
     }
 
-    sep = strchr(raw, ':');
-    if (sep == NULL) {
+    if (strcmp(key, "build") == 0 && strchr(value, '{') != NULL) {
+      in_build = 1;
+      in_artifacts = 0;
       continue;
     }
-    saw_mapping = 1;
-    *sep = '\0';
-    value = trim(sep + 1);
-    value = strip_quotes(value);
-
-    if (indent == 0) {
-      section[0] = '\0';
-      if (strcmp(raw, "kind") == 0) {
-        (void)copy_string(out->kind, sizeof(out->kind), value, NULL, 0);
-      } else if ((strcmp(raw, "build") == 0 || strcmp(raw, "artifacts") == 0) && value[0] == '\0') {
-        (void)copy_string(section, sizeof(section), raw, NULL, 0);
-      }
+    if (strcmp(key, "artifacts") == 0 && strchr(value, '{') != NULL) {
+      in_artifacts = 1;
+      in_build = 0;
       continue;
     }
 
-    if (strcmp(section, "build") == 0) {
-      if (strcmp(raw, "runner") == 0) {
+    if (in_build) {
+      if (strcmp(key, "runner") == 0) {
         (void)copy_string(out->build.runner, sizeof(out->build.runner), value, NULL, 0);
-      } else if (strcmp(raw, "main") == 0) {
+      } else if (strcmp(key, "main") == 0) {
         (void)copy_string(out->build.main, sizeof(out->build.main), value, NULL, 0);
       }
-    } else if (strcmp(section, "artifacts") == 0) {
-      if (strcmp(raw, "binary") == 0) {
+    } else if (in_artifacts) {
+      if (strcmp(key, "binary") == 0) {
         (void)copy_string(out->artifacts.binary, sizeof(out->artifacts.binary), value, NULL, 0);
-      } else if (strcmp(raw, "primary") == 0) {
+      } else if (strcmp(key, "primary") == 0) {
         (void)copy_string(out->artifacts.primary, sizeof(out->artifacts.primary), value, NULL, 0);
       }
+    } else if (strcmp(key, "kind") == 0) {
+      (void)copy_string(out->kind, sizeof(out->kind), value, NULL, 0);
     }
   }
 
   (void)fclose(f);
 
-  if (!saw_mapping) {
-    set_err(err, err_len, "%s: holon.yaml must be a YAML mapping", path);
+  if (!saw_manifest) {
+    set_err(err, err_len, "%s: missing holons.v1.manifest option in holon.proto", path);
     return -1;
   }
   return 0;
@@ -420,21 +552,25 @@ static int discover_scan_dir(const char *root,
       continue;
     }
 
-    if (!S_ISREG(st.st_mode) || strcmp(item->d_name, "holon.yaml") != 0) {
+    if (!S_ISREG(st.st_mode) || strcmp(item->d_name, "holon.proto") != 0) {
       continue;
     }
 
     {
       holon_entry_t entry;
       char abs_dir[PATH_MAX];
+      char manifest_root[PATH_MAX];
 
       (void)memset(&entry, 0, sizeof(entry));
       if (holons_parse_holon(child, &entry.identity, NULL, 0) != 0) {
         continue;
       }
       entry.has_manifest = parse_manifest_file(child, &entry.manifest, NULL, 0) == 0 ? 1 : 0;
-      if (realpath(dir, abs_dir) == NULL) {
-        (void)copy_string(abs_dir, sizeof(abs_dir), dir, NULL, 0);
+      if (manifest_root_from_path(child, manifest_root, sizeof(manifest_root), NULL, 0) != 0) {
+        (void)copy_string(manifest_root, sizeof(manifest_root), dir, NULL, 0);
+      }
+      if (realpath(manifest_root, abs_dir) == NULL) {
+        (void)copy_string(abs_dir, sizeof(abs_dir), manifest_root, NULL, 0);
       }
 
       slug_for_identity(&entry.identity, entry.slug, sizeof(entry.slug));
@@ -1325,7 +1461,7 @@ int holons_serve(const char *listen_uri,
 int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size_t err_len) {
   FILE *f;
   char line[1024];
-  int saw_mapping = 0;
+  int saw_manifest = 0;
 
   if (path == NULL || out == NULL) {
     set_err(err, err_len, "path and output are required");
@@ -1341,51 +1477,47 @@ int holons_parse_holon(const char *path, holons_identity_t *out, char *err, size
 
   while (fgets(line, sizeof(line), f) != NULL) {
     char *raw = trim(line);
-    char *sep;
+    char *key;
     char *value;
 
-    if (raw[0] == '\0' || raw[0] == '#') {
+    if (strstr(raw, "holons.v1.manifest") != NULL) {
+      saw_manifest = 1;
+    }
+    if (raw[0] == '\0' || raw[0] == '#' || (raw[0] == '/' && raw[1] == '/')) {
+      continue;
+    }
+    if (!saw_manifest) {
+      continue;
+    }
+    if (!split_proto_field_line(raw, &key, &value)) {
       continue;
     }
 
-    sep = strchr(raw, ':');
-    if (sep == NULL) {
-      continue;
-    }
-    saw_mapping = 1;
-    *sep = '\0';
-
-    value = trim(sep + 1);
-    value = strip_quotes(value);
-    if (strcmp(value, "null") == 0) {
-      value = "";
-    }
-
-    if (strcmp(raw, "uuid") == 0) {
+    if (strcmp(key, "uuid") == 0) {
       (void)copy_string(out->uuid, sizeof(out->uuid), value, NULL, 0);
-    } else if (strcmp(raw, "given_name") == 0) {
+    } else if (strcmp(key, "given_name") == 0) {
       (void)copy_string(out->given_name, sizeof(out->given_name), value, NULL, 0);
-    } else if (strcmp(raw, "family_name") == 0) {
+    } else if (strcmp(key, "family_name") == 0) {
       (void)copy_string(out->family_name, sizeof(out->family_name), value, NULL, 0);
-    } else if (strcmp(raw, "motto") == 0) {
+    } else if (strcmp(key, "motto") == 0) {
       (void)copy_string(out->motto, sizeof(out->motto), value, NULL, 0);
-    } else if (strcmp(raw, "composer") == 0) {
+    } else if (strcmp(key, "composer") == 0) {
       (void)copy_string(out->composer, sizeof(out->composer), value, NULL, 0);
-    } else if (strcmp(raw, "clade") == 0) {
+    } else if (strcmp(key, "clade") == 0) {
       (void)copy_string(out->clade, sizeof(out->clade), value, NULL, 0);
-    } else if (strcmp(raw, "status") == 0) {
+    } else if (strcmp(key, "status") == 0) {
       (void)copy_string(out->status, sizeof(out->status), value, NULL, 0);
-    } else if (strcmp(raw, "born") == 0) {
+    } else if (strcmp(key, "born") == 0) {
       (void)copy_string(out->born, sizeof(out->born), value, NULL, 0);
-    } else if (strcmp(raw, "lang") == 0) {
+    } else if (strcmp(key, "lang") == 0) {
       (void)copy_string(out->lang, sizeof(out->lang), value, NULL, 0);
     }
   }
 
   (void)fclose(f);
 
-  if (!saw_mapping) {
-    set_err(err, err_len, "%s: holon.yaml must be a YAML mapping", path);
+  if (!saw_manifest) {
+    set_err(err, err_len, "%s: missing holons.v1.manifest option in holon.proto", path);
     return -1;
   }
 
@@ -4028,7 +4160,6 @@ static int holons_build_service_doc(const holons_service_def_t *service,
 }
 
 int holons_build_describe_response(const char *proto_dir,
-                                   const char *holon_yaml_path,
                                    holons_describe_response_t *out,
                                    char *err,
                                    size_t err_len) {
@@ -4037,17 +4168,22 @@ int holons_build_describe_response(const char *proto_dir,
   size_t visible_services = 0;
   size_t i;
   size_t out_index = 0;
+  char manifest_path[PATH_MAX];
 
-  if (out == NULL || holon_yaml_path == NULL) {
-    set_err(err, err_len, "response output and holon yaml path are required");
+  if (out == NULL) {
+    set_err(err, err_len, "response output is required");
     return -1;
   }
 
   holons_init_describe_response(out);
   (void)memset(&identity, 0, sizeof(identity));
   (void)memset(&index, 0, sizeof(index));
+  manifest_path[0] = '\0';
 
-  if (holons_parse_holon(holon_yaml_path, &identity, err, err_len) != 0) {
+  if (resolve_manifest_path(proto_dir, manifest_path, sizeof(manifest_path), err, err_len) != 0) {
+    return -1;
+  }
+  if (holons_parse_holon(manifest_path, &identity, err, err_len) != 0) {
     return -1;
   }
   slug_for_identity(&identity, out->slug, sizeof(out->slug));
@@ -4099,12 +4235,11 @@ int holons_build_describe_response(const char *proto_dir,
 }
 
 int holons_make_holonmeta_registration(const char *proto_dir,
-                                       const char *holon_yaml_path,
                                        holons_holonmeta_registration_t *out,
                                        char *err,
                                        size_t err_len) {
-  if (out == NULL || holon_yaml_path == NULL) {
-    set_err(err, err_len, "registration output and holon yaml path are required");
+  if (out == NULL) {
+    set_err(err, err_len, "registration output is required");
     return -1;
   }
   (void)memset(out, 0, sizeof(*out));
@@ -4115,8 +4250,6 @@ int holons_make_holonmeta_registration(const char *proto_dir,
   if (proto_dir != NULL) {
     (void)copy_string(out->proto_dir, sizeof(out->proto_dir), proto_dir, err, err_len);
   }
-  (void)copy_string(out->holon_yaml_path, sizeof(out->holon_yaml_path),
-                    holon_yaml_path, err, err_len);
   return 0;
 }
 
@@ -4130,9 +4263,5 @@ int holons_invoke_holonmeta_describe(const holons_holonmeta_registration_t *regi
     set_err(err, err_len, "registration is required");
     return -1;
   }
-  return holons_build_describe_response(registration->proto_dir,
-                                        registration->holon_yaml_path,
-                                        out,
-                                        err,
-                                        err_len);
+  return holons_build_describe_response(registration->proto_dir, out, err, err_len);
 }

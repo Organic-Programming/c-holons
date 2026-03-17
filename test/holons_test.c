@@ -426,7 +426,7 @@ static void write_connect_holon_fixture(const char *root,
   snprintf(holon_dir, sizeof(holon_dir), "%s/holons/%s", root, slug);
   snprintf(bin_dir, sizeof(bin_dir), "%s/.op/build/bin", holon_dir);
   snprintf(binary_path, sizeof(binary_path), "%s/connect-server", bin_dir);
-  snprintf(manifest_path, sizeof(manifest_path), "%s/holon.yaml", holon_dir);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/holon.proto", holon_dir);
   snprintf(args_path, sizeof(args_path), "%s/%s.args", root, slug);
   snprintf(out_pid_file, out_pid_file_len, "%s/%s.pid", root, slug);
   snprintf(out_port_file, out_port_file_len, "%s/.op/run/%s.port", root, slug);
@@ -510,15 +510,23 @@ static void write_connect_holon_fixture(const char *root,
   f = fopen(manifest_path, "w");
   assert(f != NULL);
   fprintf(f,
-          "uuid: \"%s-uuid\"\n"
-          "given_name: \"%s\"\n"
-          "family_name: \"%s\"\n"
-          "composer: \"connect-test\"\n"
-          "kind: service\n"
-          "build:\n"
-          "  runner: shell\n"
-          "artifacts:\n"
-          "  binary: \"connect-server\"\n",
+          "syntax = \"proto3\";\n"
+          "package holons.test.v1;\n\n"
+          "option (holons.v1.manifest) = {\n"
+          "  identity: {\n"
+          "    uuid: \"%s-uuid\"\n"
+          "    given_name: \"%s\"\n"
+          "    family_name: \"%s\"\n"
+          "    composer: \"connect-test\"\n"
+          "  }\n"
+          "  kind: \"service\"\n"
+          "  build: {\n"
+          "    runner: \"shell\"\n"
+          "  }\n"
+          "  artifacts: {\n"
+          "    binary: \"connect-server\"\n"
+          "  }\n"
+          "};\n",
           slug,
           given_name,
           family_name);
@@ -547,25 +555,31 @@ static void write_discovery_holon(const char *dir,
 
   snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
   (void)system(cmd);
-  snprintf(path, sizeof(path), "%s/holon.yaml", dir);
+  snprintf(path, sizeof(path), "%s/holon.proto", dir);
   f = fopen(path, "w");
   assert(f != NULL);
   fprintf(f,
-          "schema: holon/v0\n"
-          "uuid: \"%s\"\n"
-          "given_name: \"%s\"\n"
-          "family_name: \"%s\"\n"
-          "motto: \"Test\"\n"
-          "composer: \"test\"\n"
-          "clade: deterministic/pure\n"
-          "status: draft\n"
-          "born: \"2026-03-07\"\n"
-          "generated_by: test\n"
-          "kind: native\n"
-          "build:\n"
-          "  runner: go-module\n"
-          "artifacts:\n"
-          "  binary: %s\n",
+          "syntax = \"proto3\";\n"
+          "package holons.test.v1;\n\n"
+          "option (holons.v1.manifest) = {\n"
+          "  identity: {\n"
+          "    uuid: \"%s\"\n"
+          "    given_name: \"%s\"\n"
+          "    family_name: \"%s\"\n"
+          "    motto: \"Test\"\n"
+          "    composer: \"test\"\n"
+          "    clade: \"deterministic/pure\"\n"
+          "    status: \"draft\"\n"
+          "    born: \"2026-03-07\"\n"
+          "  }\n"
+          "  kind: \"native\"\n"
+          "  build: {\n"
+          "    runner: \"go-module\"\n"
+          "  }\n"
+          "  artifacts: {\n"
+          "    binary: \"%s\"\n"
+          "  }\n"
+          "};\n",
           uuid,
           given_name,
           family_name,
@@ -582,16 +596,22 @@ static void write_echo_holon(const char *root) {
 
   snprintf(proto_dir, sizeof(proto_dir), "%s/protos/echo/v1", root);
   snprintf(proto_path, sizeof(proto_path), "%s/echo.proto", proto_dir);
-  snprintf(holon_path, sizeof(holon_path), "%s/holon.yaml", root);
+  snprintf(holon_path, sizeof(holon_path), "%s/holon.proto", root);
   snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", proto_dir);
   assert(system(cmd) == 0);
 
   f = fopen(holon_path, "w");
   assert(f != NULL);
   fprintf(f,
-          "given_name: Echo\n"
-          "family_name: Server\n"
-          "motto: Reply precisely.\n");
+          "syntax = \"proto3\";\n"
+          "package holons.test.v1;\n\n"
+          "option (holons.v1.manifest) = {\n"
+          "  identity: {\n"
+          "    given_name: \"Echo\"\n"
+          "    family_name: \"Server\"\n"
+          "    motto: \"Reply precisely.\"\n"
+          "  }\n"
+          "};\n");
   fclose(f);
 
   f = fopen(proto_path, "w");
@@ -709,7 +729,6 @@ static void test_discover(void) {
 static void test_describe_response(void) {
   char root[] = "/tmp/holons_describe_c_XXXXXX";
   char proto_dir[1024];
-  char holon_yaml[1024];
   char cleanup_cmd[1200];
   char err[256];
   holons_describe_response_t response;
@@ -717,11 +736,10 @@ static void test_describe_response(void) {
   check_int(make_temp_dir(root) == 0, "mk describe temp dir");
   write_echo_holon(root);
   snprintf(proto_dir, sizeof(proto_dir), "%s/protos", root);
-  snprintf(holon_yaml, sizeof(holon_yaml), "%s/holon.yaml", root);
 
   memset(&response, 0, sizeof(response));
   err[0] = '\0';
-  check_int(holons_build_describe_response(proto_dir, holon_yaml, &response, err, sizeof(err)) == 0,
+  check_int(holons_build_describe_response(proto_dir, &response, err, sizeof(err)) == 0,
             "describe build response");
   check_int(strcmp(response.slug, "echo-server") == 0, "describe slug");
   check_int(strcmp(response.motto, "Reply precisely.") == 0, "describe motto");
@@ -765,7 +783,6 @@ static void test_describe_response(void) {
 static void test_describe_registration(void) {
   char root[] = "/tmp/holons_meta_reg_c_XXXXXX";
   char proto_dir[1024];
-  char holon_yaml[1024];
   char cleanup_cmd[1200];
   char err[256];
   holons_holonmeta_registration_t registration;
@@ -775,14 +792,9 @@ static void test_describe_registration(void) {
   check_int(make_temp_dir(root) == 0, "mk registration temp dir");
   write_echo_holon(root);
   snprintf(proto_dir, sizeof(proto_dir), "%s/protos", root);
-  snprintf(holon_yaml, sizeof(holon_yaml), "%s/holon.yaml", root);
 
   err[0] = '\0';
-  check_int(holons_make_holonmeta_registration(proto_dir,
-                                               holon_yaml,
-                                               &registration,
-                                               err,
-                                               sizeof(err)) == 0,
+  check_int(holons_make_holonmeta_registration(proto_dir, &registration, err, sizeof(err)) == 0,
             "holonmeta registration build");
   check_int(strcmp(registration.service_name, "holonmeta.v1.HolonMeta") == 0,
             "holonmeta registration service");
@@ -808,29 +820,33 @@ static void test_describe_registration(void) {
 
 static void test_describe_without_protos(void) {
   char root[] = "/tmp/holons_describe_empty_c_XXXXXX";
-  char holon_yaml[1024];
+  char manifest_path[1024];
+  char proto_dir[1024];
   char cleanup_cmd[1200];
   char err[256];
   FILE *f;
   holons_describe_response_t response;
 
   check_int(make_temp_dir(root) == 0, "mk empty describe temp dir");
-  snprintf(holon_yaml, sizeof(holon_yaml), "%s/holon.yaml", root);
-  f = fopen(holon_yaml, "w");
+  snprintf(manifest_path, sizeof(manifest_path), "%s/holon.proto", root);
+  snprintf(proto_dir, sizeof(proto_dir), "%s/protos", root);
+  f = fopen(manifest_path, "w");
   assert(f != NULL);
   fprintf(f,
-          "given_name: Empty\n"
-          "family_name: Holon\n"
-          "motto: Still available.\n");
+          "syntax = \"proto3\";\n"
+          "package holons.test.v1;\n\n"
+          "option (holons.v1.manifest) = {\n"
+          "  identity: {\n"
+          "    given_name: \"Empty\"\n"
+          "    family_name: \"Holon\"\n"
+          "    motto: \"Still available.\"\n"
+          "  }\n"
+          "};\n");
   fclose(f);
 
   memset(&response, 0, sizeof(response));
   err[0] = '\0';
-  check_int(holons_build_describe_response("/tmp/this-path-does-not-exist",
-                                           holon_yaml,
-                                           &response,
-                                           err,
-                                           sizeof(err)) == 0,
+  check_int(holons_build_describe_response(proto_dir, &response, err, sizeof(err)) == 0,
             "describe without protos");
   check_int(strcmp(response.slug, "empty-holon") == 0, "describe empty slug");
   check_int(strcmp(response.motto, "Still available.") == 0, "describe empty motto");
@@ -1148,7 +1164,7 @@ static void test_grpc_bridge_advertises_public_uri_first(void) {
   char root[] = "/tmp/holons_grpc_bridge_XXXXXX";
   char proto_dir[1024];
   char proto_file[1024];
-  char holon_yaml[1024];
+  char manifest_path[1024];
   char backend_path[1024];
   char backend_uri_file[1024];
   char wrapper_path[1024];
@@ -1165,7 +1181,7 @@ static void test_grpc_bridge_advertises_public_uri_first(void) {
 
   snprintf(proto_dir, sizeof(proto_dir), "%s/protos/greeting/v1", root);
   snprintf(proto_file, sizeof(proto_file), "%s/greeting.proto", proto_dir);
-  snprintf(holon_yaml, sizeof(holon_yaml), "%s/holon.yaml", root);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/holon.proto", root);
   snprintf(backend_path, sizeof(backend_path), "%s/backend.sh", root);
   snprintf(backend_uri_file, sizeof(backend_uri_file), "%s/backend.uri", root);
   snprintf(wrapper_path, sizeof(wrapper_path), "%s/bridge-wrapper.sh", root);
@@ -1184,14 +1200,19 @@ static void test_grpc_bridge_advertises_public_uri_first(void) {
           "message PingResponse {}\n");
   fclose(f);
 
-  f = fopen(holon_yaml, "w");
+  f = fopen(manifest_path, "w");
   assert(f != NULL);
   fprintf(f,
-          "schema: holon/v0\n"
-          "uuid: \"grpc-bridge-test\"\n"
-          "given_name: \"bridge\"\n"
-          "family_name: \"test\"\n"
-          "motto: \"Checks startup ordering.\"\n");
+          "syntax = \"proto3\";\n"
+          "package holons.test.v1;\n\n"
+          "option (holons.v1.manifest) = {\n"
+          "  identity: {\n"
+          "    uuid: \"grpc-bridge-test\"\n"
+          "    given_name: \"bridge\"\n"
+          "    family_name: \"test\"\n"
+          "    motto: \"Checks startup ordering.\"\n"
+          "  }\n"
+          "};\n");
   fclose(f);
 
   f = fopen(backend_path, "w");
@@ -1266,7 +1287,7 @@ static void test_grpc_bridge_advertises_public_uri_first(void) {
   assert(f != NULL);
   fprintf(f,
           "#!/bin/sh\n"
-          "exec ./bin/grpc-bridge --backend %c%s%c --proto-dir %c%s%c --holon-yaml %c%s%c \"$@\"\n",
+          "exec ./bin/grpc-bridge --backend %c%s%c --proto-dir %c%s%c --manifest %c%s%c \"$@\"\n",
           '\'',
           backend_path,
           '\'',
@@ -1274,7 +1295,7 @@ static void test_grpc_bridge_advertises_public_uri_first(void) {
           root,
           '\'',
           '\'',
-          holon_yaml,
+          manifest_path,
           '\'');
   fclose(f);
   check_int(chmod(wrapper_path, 0755) == 0, "grpc bridge wrapper executable");
@@ -1487,7 +1508,7 @@ static void test_echo_wrapper_invocation(void) {
   capture[0] = '\0';
   exit_code = command_exit_code(
       "./bin/grpc-bridge --backend /tmp/cert-backend --proto-dir /tmp/cert-protos "
-      "--holon-yaml /tmp/cert-holon.yaml --listen stdio:// >/dev/null 2>&1");
+      "--manifest /tmp/cert-holon.proto --listen stdio:// >/dev/null 2>&1");
   check_int(exit_code == 0, "grpc-bridge wrapper exit");
   check_int(read_file(fake_log, capture, sizeof(capture)) == 0,
             "read grpc-bridge wrapper capture");
@@ -1501,9 +1522,9 @@ static void test_echo_wrapper_invocation(void) {
               "grpc-bridge wrapper forwards backend");
     check_int(strstr(capture, "--proto-dir") != NULL && strstr(capture, "/tmp/cert-protos") != NULL,
               "grpc-bridge wrapper forwards proto dir");
-    check_int(strstr(capture, "--holon-yaml") != NULL &&
-                  strstr(capture, "/tmp/cert-holon.yaml") != NULL,
-              "grpc-bridge wrapper forwards holon yaml");
+    check_int(strstr(capture, "--manifest") != NULL &&
+                  strstr(capture, "/tmp/cert-holon.proto") != NULL,
+              "grpc-bridge wrapper forwards manifest");
     check_int(strstr(capture, "--listen") != NULL && strstr(capture, "stdio://") != NULL,
               "grpc-bridge wrapper forwards listen");
   }
@@ -1589,15 +1610,21 @@ static void test_identity_parsing(void) {
   }
 
   fprintf(f,
-          "uuid: \"abc-123\"\n"
-          "given_name: \"demo\"\n"
-          "family_name: \"Holons\"\n"
-          "motto: \"Hello\"\n"
-          "composer: \"B. ALTER\"\n"
-          "clade: \"deterministic/pure\"\n"
-          "status: draft\n"
-          "born: \"2026-02-12\"\n"
-          "lang: \"c\"\n");
+          "syntax = \"proto3\";\n"
+          "package test.v1;\n\n"
+          "option (holons.v1.manifest) = {\n"
+          "  identity: {\n"
+          "    uuid: \"abc-123\"\n"
+          "    given_name: \"demo\"\n"
+          "    family_name: \"Holons\"\n"
+          "    motto: \"Hello\"\n"
+          "    composer: \"B. ALTER\"\n"
+          "    clade: \"deterministic/pure\"\n"
+          "    status: \"draft\"\n"
+          "    born: \"2026-02-12\"\n"
+          "  }\n"
+          "  lang: \"c\"\n"
+          "};\n");
   fclose(f);
 
   check_int(holons_parse_holon(path, &id, err, sizeof(err)) == 0, "parse_holon");
