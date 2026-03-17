@@ -39,7 +39,7 @@ type config struct {
 	listenURI string
 	backend   string
 	protoDir  string
-	holonYAML string
+	manifest  string
 }
 
 type bridgeServer struct {
@@ -145,7 +145,7 @@ func main() {
 	}).handle))
 	defer server.Stop()
 
-	if err := describe.Register(server, cfg.protoDir, cfg.holonYAML); err != nil {
+	if err := describe.Register(server, cfg.protoDir, cfg.manifest); err != nil {
 		backend.logs.flush()
 		log.Fatalf("grpc-bridge: register describe: %v", err)
 	}
@@ -193,7 +193,8 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.listenURI, "listen", transport.DefaultURI, "transport URI")
 	fs.StringVar(&cfg.backend, "backend", "", "backend executable path")
 	fs.StringVar(&cfg.protoDir, "proto-dir", "", "proto directory for dynamic forwarding")
-	fs.StringVar(&cfg.holonYAML, "holon-yaml", "", "holon.yaml path for Describe")
+	fs.StringVar(&cfg.manifest, "manifest", "", "manifest path for Describe (for example api/v1/holon.proto)")
+	fs.StringVar(&cfg.manifest, "holon-yaml", "", "deprecated alias for --manifest")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -204,8 +205,8 @@ func parseArgs(args []string) (config, error) {
 	if strings.TrimSpace(cfg.protoDir) == "" {
 		return cfg, fmt.Errorf("--proto-dir is required")
 	}
-	if strings.TrimSpace(cfg.holonYAML) == "" {
-		return cfg, fmt.Errorf("--holon-yaml is required")
+	if strings.TrimSpace(cfg.manifest) == "" {
+		return cfg, fmt.Errorf("--manifest is required")
 	}
 	return cfg, nil
 }
