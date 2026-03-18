@@ -26,7 +26,6 @@ Stable primitives:
 - `holons_parse_flags`
 - `holons_parse_uri`
 - `holons_listen` / `holons_accept` / `holons_close_listener`
-- `holons_mem_dial`
 - `holons_serve`
 - `holons_parse_holon`
 
@@ -38,7 +37,6 @@ Required schemes from Article 11:
 
 Optional schemes:
 - `unix://`
-- `mem://`
 - `ws://`
 - `wss://`
 
@@ -52,7 +50,7 @@ Important:
 When modifying `src/holons.c`:
 1. Keep dependencies limited to libc + POSIX; do not introduce external runtime dependencies.
 2. Preserve deterministic behavior for parsing and listener lifecycle.
-3. Keep `stdio://` and `mem://` single-connection semantics explicit.
+3. Keep `stdio://` single-connection semantics explicit.
 4. Keep error messages actionable and transport-specific.
 5. Update tests in `test/holons_test.c` for every behavior change.
 

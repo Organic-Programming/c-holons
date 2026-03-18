@@ -5,7 +5,7 @@ C SDK for Organic Programming.
 The current C surface includes:
 
 - `transport`: URI parsing plus low-level listeners and dial helpers for
-  `tcp`, `unix`, `stdio`, and `mem`
+  `tcp`, `unix`, and `stdio`
 - `serve`: standard `--listen` / `--port` handling and a connection loop
 - `identity`: `holon.proto` parsing
 - `discover`: filesystem discovery for local, `$OPBIN`, and cache roots
@@ -30,7 +30,6 @@ clang -std=c11 -Wall -Wextra -pedantic -I include src/holons.c test/holons_test.
 | `holons_parse_flags` | Parse `--listen` / `--port` with default `tcp://:9090` |
 | `holons_parse_uri` | Parse transport URI into a normalized struct |
 | `holons_listen` / `holons_accept` | Listener + connection lifecycle |
-| `holons_mem_dial` | Client-side dial for `mem://` |
 | `holons_dial_tcp` | Client-side dial for TCP listeners |
 | `holons_dial_stdio` | Wrap current process stdin/stdout as a client connection |
 | `holons_serve` | Standard connection loop for a holon `serve` command |
