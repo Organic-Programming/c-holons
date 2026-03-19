@@ -40,6 +40,7 @@ type config struct {
 	backend   string
 	protoDir  string
 	manifest  string
+	reflect   bool
 }
 
 type bridgeServer struct {
@@ -149,7 +150,11 @@ func main() {
 		backend.logs.flush()
 		log.Fatalf("grpc-bridge: register describe: %v", err)
 	}
-	reflection.Register(server)
+	reflectionEnabled := false
+	if cfg.reflect {
+		reflection.Register(server)
+		reflectionEnabled = true
+	}
 
 	listener, err := transport.Listen(cfg.listenURI)
 	if err != nil {
@@ -163,7 +168,11 @@ func main() {
 		serveErrCh <- server.Serve(listener)
 	}()
 
-	log.Printf("gRPC bridge listening on %s (backend %s)", advertisedURI(cfg.listenURI, listener.Addr()), backend.uri)
+	mode := "Describe ON, reflection OFF"
+	if reflectionEnabled {
+		mode = "Describe ON, reflection ON"
+	}
+	log.Printf("gRPC bridge listening on %s (%s, backend %s)", advertisedURI(cfg.listenURI, listener.Addr()), mode, backend.uri)
 	backend.logs.flush()
 
 	sigCh := make(chan os.Signal, 2)
@@ -195,6 +204,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.protoDir, "proto-dir", "", "proto directory for dynamic forwarding")
 	fs.StringVar(&cfg.manifest, "manifest", "", "manifest path for Describe (for example api/v1/holon.proto)")
 	fs.StringVar(&cfg.manifest, "holon-yaml", "", "deprecated alias for --manifest")
+	fs.BoolVar(&cfg.reflect, "reflect", false, "enable gRPC reflection for debugging")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
