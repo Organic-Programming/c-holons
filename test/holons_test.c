@@ -741,8 +741,9 @@ static void test_describe_response(void) {
   err[0] = '\0';
   check_int(holons_build_describe_response(proto_dir, &response, err, sizeof(err)) == 0,
             "describe build response");
-  check_int(strcmp(response.slug, "echo-server") == 0, "describe slug");
-  check_int(strcmp(response.motto, "Reply precisely.") == 0, "describe motto");
+  check_int(strcmp(response.manifest.identity.given_name, "Echo") == 0, "describe identity given_name");
+  check_int(strcmp(response.manifest.identity.family_name, "Server") == 0, "describe identity family_name");
+  check_int(strcmp(response.manifest.identity.motto, "Reply precisely.") == 0, "describe identity motto");
   check_int(response.service_count == 1, "describe service count");
   if (response.service_count == 1) {
     holons_service_doc_t *service = &response.services[0];
@@ -785,7 +786,7 @@ static void test_describe_registration(void) {
   char proto_dir[1024];
   char cleanup_cmd[1200];
   char err[256];
-  holons_holonmeta_registration_t registration;
+  holons_describe_registration_t registration;
   holons_describe_response_t response;
   holons_describe_request_t request;
 
@@ -794,28 +795,31 @@ static void test_describe_registration(void) {
   snprintf(proto_dir, sizeof(proto_dir), "%s/protos", root);
 
   err[0] = '\0';
-  check_int(holons_make_holonmeta_registration(proto_dir, &registration, err, sizeof(err)) == 0,
-            "holonmeta registration build");
-  check_int(strcmp(registration.service_name, "holonmeta.v1.HolonMeta") == 0,
-            "holonmeta registration service");
+  check_int(holons_make_describe_registration(proto_dir, &registration, err, sizeof(err)) == 0,
+            "describe registration build");
+  check_int(strcmp(registration.service_name, "holons.v1.HolonMeta") == 0,
+            "describe registration service");
   check_int(strcmp(registration.method_name, "Describe") == 0,
-            "holonmeta registration method");
+            "describe registration method");
 
   memset(&response, 0, sizeof(response));
   memset(&request, 0, sizeof(request));
   err[0] = '\0';
-  check_int(holons_invoke_holonmeta_describe(&registration,
-                                             &request,
-                                             &response,
-                                             err,
-                                             sizeof(err)) == 0,
-            "holonmeta registration invoke");
-  check_int(strcmp(response.slug, "echo-server") == 0, "holonmeta registration slug");
-  check_int(response.service_count == 1, "holonmeta registration services");
+  check_int(holons_invoke_describe(&registration,
+                                   &request,
+                                   &response,
+                                   err,
+                                   sizeof(err)) == 0,
+            "describe registration invoke");
+  check_int(strcmp(response.manifest.identity.given_name, "Echo") == 0,
+            "describe registration identity given_name");
+  check_int(strcmp(response.manifest.identity.family_name, "Server") == 0,
+            "describe registration identity family_name");
+  check_int(response.service_count == 1, "describe registration services");
 
   holons_free_describe_response(&response);
   snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf '%s'", root);
-  check_int(system(cleanup_cmd) == 0, "cleanup holonmeta registration tmp root");
+  check_int(system(cleanup_cmd) == 0, "cleanup describe registration tmp root");
 }
 
 static void test_describe_without_protos(void) {
@@ -848,8 +852,9 @@ static void test_describe_without_protos(void) {
   err[0] = '\0';
   check_int(holons_build_describe_response(proto_dir, &response, err, sizeof(err)) == 0,
             "describe without protos");
-  check_int(strcmp(response.slug, "empty-holon") == 0, "describe empty slug");
-  check_int(strcmp(response.motto, "Still available.") == 0, "describe empty motto");
+  check_int(strcmp(response.manifest.identity.given_name, "Empty") == 0, "describe empty identity given_name");
+  check_int(strcmp(response.manifest.identity.family_name, "Holon") == 0, "describe empty identity family_name");
+  check_int(strcmp(response.manifest.identity.motto, "Still available.") == 0, "describe empty identity motto");
   check_int(response.service_count == 0, "describe empty service count");
 
   holons_free_describe_response(&response);

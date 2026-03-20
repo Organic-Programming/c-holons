@@ -54,6 +54,8 @@ typedef struct {
 } holons_artifacts_t;
 
 typedef struct {
+  holons_identity_t identity;
+  char lang[64];
   char kind[64];
   holons_build_t build;
   holons_artifacts_t artifacts;
@@ -150,8 +152,7 @@ typedef struct {
 } holons_service_doc_t;
 
 typedef struct {
-  char slug[HOLONS_MAX_FIELD_LEN];
-  char motto[HOLONS_MAX_DOC_LEN];
+  holons_manifest_t manifest;
   holons_service_doc_t *services;
   size_t service_count;
 } holons_describe_response_t;
@@ -164,7 +165,7 @@ typedef struct {
   char service_name[HOLONS_MAX_FIELD_LEN];
   char method_name[HOLONS_MAX_FIELD_LEN];
   char proto_dir[HOLONS_MAX_URI_LEN];
-} holons_holonmeta_registration_t;
+} holons_describe_registration_t;
 
 const char *holons_default_uri(void);
 holons_scheme_t holons_scheme_from_uri(const char *uri);
@@ -201,15 +202,15 @@ int holons_build_describe_response(const char *proto_dir,
                                    holons_describe_response_t *out,
                                    char *err,
                                    size_t err_len);
-int holons_make_holonmeta_registration(const char *proto_dir,
-                                       holons_holonmeta_registration_t *out,
-                                       char *err,
-                                       size_t err_len);
-int holons_invoke_holonmeta_describe(const holons_holonmeta_registration_t *registration,
-                                     const holons_describe_request_t *request,
-                                     holons_describe_response_t *out,
-                                     char *err,
-                                     size_t err_len);
+int holons_make_describe_registration(const char *proto_dir,
+                                      holons_describe_registration_t *out,
+                                      char *err,
+                                      size_t err_len);
+int holons_invoke_describe(const holons_describe_registration_t *registration,
+                           const holons_describe_request_t *request,
+                           holons_describe_response_t *out,
+                           char *err,
+                           size_t err_len);
 void holons_free_describe_response(holons_describe_response_t *response);
 int holons_discover(const char *root,
                     holon_entry_t **entries,

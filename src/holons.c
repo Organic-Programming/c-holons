@@ -368,6 +368,7 @@ static int parse_manifest_file(const char *path, holons_manifest_t *out, char *e
   FILE *f;
   char line[1024];
   int saw_manifest = 0;
+  int in_identity = 0;
   int in_build = 0;
   int in_artifacts = 0;
 
@@ -399,6 +400,7 @@ static int parse_manifest_file(const char *path, holons_manifest_t *out, char *e
       continue;
     }
     if (raw[0] == '}') {
+      in_identity = 0;
       in_build = 0;
       in_artifacts = 0;
       continue;
@@ -407,18 +409,44 @@ static int parse_manifest_file(const char *path, holons_manifest_t *out, char *e
       continue;
     }
 
+    if (strcmp(key, "identity") == 0 && strchr(value, '{') != NULL) {
+      in_identity = 1;
+      in_build = 0;
+      in_artifacts = 0;
+      continue;
+    }
     if (strcmp(key, "build") == 0 && strchr(value, '{') != NULL) {
+      in_identity = 0;
       in_build = 1;
       in_artifacts = 0;
       continue;
     }
     if (strcmp(key, "artifacts") == 0 && strchr(value, '{') != NULL) {
+      in_identity = 0;
       in_artifacts = 1;
       in_build = 0;
       continue;
     }
 
-    if (in_build) {
+    if (in_identity) {
+      if (strcmp(key, "uuid") == 0) {
+        (void)copy_string(out->identity.uuid, sizeof(out->identity.uuid), value, NULL, 0);
+      } else if (strcmp(key, "given_name") == 0) {
+        (void)copy_string(out->identity.given_name, sizeof(out->identity.given_name), value, NULL, 0);
+      } else if (strcmp(key, "family_name") == 0) {
+        (void)copy_string(out->identity.family_name, sizeof(out->identity.family_name), value, NULL, 0);
+      } else if (strcmp(key, "motto") == 0) {
+        (void)copy_string(out->identity.motto, sizeof(out->identity.motto), value, NULL, 0);
+      } else if (strcmp(key, "composer") == 0) {
+        (void)copy_string(out->identity.composer, sizeof(out->identity.composer), value, NULL, 0);
+      } else if (strcmp(key, "clade") == 0) {
+        (void)copy_string(out->identity.clade, sizeof(out->identity.clade), value, NULL, 0);
+      } else if (strcmp(key, "status") == 0) {
+        (void)copy_string(out->identity.status, sizeof(out->identity.status), value, NULL, 0);
+      } else if (strcmp(key, "born") == 0) {
+        (void)copy_string(out->identity.born, sizeof(out->identity.born), value, NULL, 0);
+      }
+    } else if (in_build) {
       if (strcmp(key, "runner") == 0) {
         (void)copy_string(out->build.runner, sizeof(out->build.runner), value, NULL, 0);
       } else if (strcmp(key, "main") == 0) {
@@ -432,6 +460,9 @@ static int parse_manifest_file(const char *path, holons_manifest_t *out, char *e
       }
     } else if (strcmp(key, "kind") == 0) {
       (void)copy_string(out->kind, sizeof(out->kind), value, NULL, 0);
+    } else if (strcmp(key, "lang") == 0) {
+      (void)copy_string(out->lang, sizeof(out->lang), value, NULL, 0);
+      (void)copy_string(out->identity.lang, sizeof(out->identity.lang), value, NULL, 0);
     }
   }
 
@@ -2821,7 +2852,7 @@ volatile sig_atomic_t *holons_stop_token(void) { return &g_stop_requested; }
 
 void holons_request_stop(void) { g_stop_requested = 1; }
 
-#define HOLONS_META_SERVICE_NAME "holonmeta.v1.HolonMeta"
+#define HOLONS_DESCRIBE_SERVICE_NAME "holons.v1.HolonMeta"
 #define HOLONS_MAX_COMMENT_LINES 32
 #define HOLONS_MAX_SCOPE_LEN HOLONS_MAX_FIELD_LEN
 #define HOLONS_SCALAR_TYPE_COUNT 15
@@ -4163,7 +4194,6 @@ int holons_build_describe_response(const char *proto_dir,
                                    holons_describe_response_t *out,
                                    char *err,
                                    size_t err_len) {
-  holons_identity_t identity;
   holons_proto_index_t index;
   size_t visible_services = 0;
   size_t i;
@@ -4176,18 +4206,15 @@ int holons_build_describe_response(const char *proto_dir,
   }
 
   holons_init_describe_response(out);
-  (void)memset(&identity, 0, sizeof(identity));
   (void)memset(&index, 0, sizeof(index));
   manifest_path[0] = '\0';
 
   if (resolve_manifest_path(proto_dir, manifest_path, sizeof(manifest_path), err, err_len) != 0) {
     return -1;
   }
-  if (holons_parse_holon(manifest_path, &identity, err, err_len) != 0) {
+  if (parse_manifest_file(manifest_path, &out->manifest, err, err_len) != 0) {
     return -1;
   }
-  slug_for_identity(&identity, out->slug, sizeof(out->slug));
-  (void)copy_string(out->motto, sizeof(out->motto), identity.motto, NULL, 0);
 
   if (proto_dir == NULL || proto_dir[0] == '\0') {
     return 0;
@@ -4198,7 +4225,7 @@ int holons_build_describe_response(const char *proto_dir,
   }
 
   for (i = 0; i < index.service_count; ++i) {
-    if (strcmp(index.services[i].full_name, HOLONS_META_SERVICE_NAME) != 0) {
+    if (strcmp(index.services[i].full_name, HOLONS_DESCRIBE_SERVICE_NAME) != 0) {
       visible_services += 1;
     }
   }
@@ -4215,7 +4242,7 @@ int holons_build_describe_response(const char *proto_dir,
   }
   out->service_count = visible_services;
   for (i = 0; i < index.service_count; ++i) {
-    if (strcmp(index.services[i].full_name, HOLONS_META_SERVICE_NAME) == 0) {
+    if (strcmp(index.services[i].full_name, HOLONS_DESCRIBE_SERVICE_NAME) == 0) {
       continue;
     }
     if (holons_build_service_doc(&index.services[i],
@@ -4234,17 +4261,17 @@ int holons_build_describe_response(const char *proto_dir,
   return 0;
 }
 
-int holons_make_holonmeta_registration(const char *proto_dir,
-                                       holons_holonmeta_registration_t *out,
-                                       char *err,
-                                       size_t err_len) {
+int holons_make_describe_registration(const char *proto_dir,
+                                      holons_describe_registration_t *out,
+                                      char *err,
+                                      size_t err_len) {
   if (out == NULL) {
     set_err(err, err_len, "registration output is required");
     return -1;
   }
   (void)memset(out, 0, sizeof(*out));
   (void)copy_string(out->service_name, sizeof(out->service_name),
-                    HOLONS_META_SERVICE_NAME, err, err_len);
+                    HOLONS_DESCRIBE_SERVICE_NAME, err, err_len);
   (void)copy_string(out->method_name, sizeof(out->method_name),
                     "Describe", err, err_len);
   if (proto_dir != NULL) {
@@ -4253,11 +4280,11 @@ int holons_make_holonmeta_registration(const char *proto_dir,
   return 0;
 }
 
-int holons_invoke_holonmeta_describe(const holons_holonmeta_registration_t *registration,
-                                     const holons_describe_request_t *request,
-                                     holons_describe_response_t *out,
-                                     char *err,
-                                     size_t err_len) {
+int holons_invoke_describe(const holons_describe_registration_t *registration,
+                           const holons_describe_request_t *request,
+                           holons_describe_response_t *out,
+                           char *err,
+                           size_t err_len) {
   (void)request;
   if (registration == NULL) {
     set_err(err, err_len, "registration is required");

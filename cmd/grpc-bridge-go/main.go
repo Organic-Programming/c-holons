@@ -259,7 +259,7 @@ func loadMethodRegistry(protoDir string) (map[string]protoreflect.MethodDescript
 		services := file.Services()
 		for i := 0; i < services.Len(); i++ {
 			service := services.Get(i)
-			if string(service.FullName()) == "holonmeta.v1.HolonMeta" {
+			if string(service.FullName()) == "holons.v1.HolonMeta" {
 				continue
 			}
 			serviceMethods := service.Methods()
